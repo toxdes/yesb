@@ -35,19 +35,14 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from release_lib import check_tools, compute_hashes, load_env_file, upload_tree
-
-ROOT = Path(__file__).resolve().parent
-DIST = ROOT / "dist"
-VERSION = (ROOT / "VERSION").read_text().strip()
-
-SUITE = "stable"
-COMPONENT = "main"
-ARCHS = ("amd64", "arm64")
-ORIGIN = "toxdes"
-LABEL = "promptr"
-PREFIX = "apt"
-
+from release_lib import (
+    check_tools,
+    compute_hashes,
+    load_config,
+    load_env_file,
+    project_version,
+    upload_tree,
+)
 
 def parse_control(deb_path):
     result = subprocess.run(
@@ -59,24 +54,25 @@ def parse_control(deb_path):
     return dict(msg)
 
 
-def find_debs():
-    debs = sorted(DIST.glob("promptr_*.deb"))
+def find_debs(dist, package_name):
+    debs = sorted(dist.glob(f"{package_name}_*.deb"))
     if not debs:
-        print("No .deb files found in dist/", file=sys.stderr)
+        print(f"No {package_name} .deb files found in {dist}/", file=sys.stderr)
         sys.exit(1)
     return debs
 
 
-def build_repo(root_dir, debs):
-    prefix_dir = root_dir / PREFIX
-    pool_dir = prefix_dir / "pool" / COMPONENT / "p" / "promptr"
+def build_repo(root_dir, debs, *, prefix, component, suite, archs, package_name,
+               origin, label):
+    prefix_dir = root_dir / prefix
+    pool_dir = prefix_dir / "pool" / component / package_name[0] / package_name
     pool_dir.mkdir(parents=True, exist_ok=True)
 
     for deb in debs:
         shutil.copy2(deb, pool_dir / deb.name)
 
-    for arch in ARCHS:
-        bins_dir = prefix_dir / "dists" / SUITE / COMPONENT / f"binary-{arch}"
+    for arch in archs:
+        bins_dir = prefix_dir / "dists" / suite / component / f"binary-{arch}"
         bins_dir.mkdir(parents=True, exist_ok=True)
 
         arch_debs = [pool_dir / d.name for d in debs
@@ -87,7 +83,10 @@ def build_repo(root_dir, debs):
         entries = []
         for deb_path in sorted(arch_debs):
             control = parse_control(deb_path)
-            rel_name = f"pool/{COMPONENT}/p/promptr/{deb_path.name}"
+            rel_name = (
+                f"pool/{component}/{package_name[0]}/{package_name}/"
+                f"{deb_path.name}"
+            )
             md5, sha1, sha256, size = compute_hashes(deb_path)
 
             control["Filename"] = rel_name
@@ -105,20 +104,27 @@ def build_repo(root_dir, debs):
         with gzip.open(bins_dir / "Packages.gz", "wt") as fp:
             fp.write(content)
 
-    dist_dir = prefix_dir / "dists" / SUITE
-    build_release(dist_dir)
+    dist_dir = prefix_dir / "dists" / suite
+    build_release(
+        dist_dir,
+        suite=suite,
+        component=component,
+        archs=archs,
+        origin=origin,
+        label=label,
+    )
 
 
-def build_release(dist_dir):
+def build_release(dist_dir, *, suite, component, archs, origin, label):
     now = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S UTC")
     lines = [
-        f"Origin: {ORIGIN}",
-        f"Label: {LABEL}",
-        f"Suite: {SUITE}",
-        f"Codename: {SUITE}",
-        f"Architectures: {' '.join(ARCHS)}",
-        f"Components: {COMPONENT}",
-        "Description: Promptr apt repository",
+        f"Origin: {origin}",
+        f"Label: {label}",
+        f"Suite: {suite}",
+        f"Codename: {suite}",
+        f"Architectures: {' '.join(archs)}",
+        f"Components: {component}",
+        f"Description: {label} apt repository",
         f"Date: {now}",
     ]
 
@@ -170,15 +176,15 @@ def gpg_sign(release_path, key_id, passphrase=None):
     )
 
 
-def export_pubkey(key_id, repo_dir):
+def export_pubkey(key_id, repo_dir, prefix):
     result = subprocess.run(
         ["gpg", "--export", "--armor", key_id],
         capture_output=True, text=True, check=True,
     )
-    (repo_dir / PREFIX / "pubkey.gpg").write_text(result.stdout)
+    (repo_dir / prefix / "pubkey.gpg").write_text(result.stdout)
 
 
-def serve_repo(repo_dir):
+def serve_repo(repo_dir, *, prefix, suite, component, package_name):
     os.chdir(repo_dir)
 
     host = "0.0.0.0"
@@ -187,10 +193,10 @@ def serve_repo(repo_dir):
     print("Test with:\n")
     print("  docker run --network=host --rm -it debian:bookworm bash")
     print("  # Inside container:")
-    print(f"  echo 'deb [trusted=yes] http://localhost:{port}/{PREFIX} stable"
-          " main' \\")
-    print("    > /etc/apt/sources.list.d/promptr.list")
-    print("  apt update && apt install promptr")
+    print(f"  echo 'deb [trusted=yes] http://localhost:{port}/{prefix} "
+          f"{suite} {component}' \\")
+    print(f"    > /etc/apt/sources.list.d/{package_name}.list")
+    print(f"  apt update && apt install {package_name}")
     print()
     print("Press Ctrl+C to stop.")
 
@@ -208,6 +214,8 @@ def main():
     parser = argparse.ArgumentParser(description="Publish apt repo to R2")
     parser.add_argument("--env", metavar="PATH",
                         help="Load env vars from file (KEY=VALUE per line)")
+    parser.add_argument("--project-root", default=".",
+                        help="Project directory containing release.toml")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
                       help="Build repo locally, skip upload")
@@ -218,31 +226,61 @@ def main():
     if args.env:
         load_env_file(args.env)
 
+    config = load_config(Path(args.project_root) / "release.toml")
+    project = config.project
+    build = config.section("build")
+    apt = config.section("deb")
+    hosting = config.section("hosting")
+    apt_hosting = hosting.get("apt", {})
+    prefix = hosting.get("apt_prefix", "apt")
+    suite = apt_hosting.get("suite", "stable")
+    component = apt_hosting.get("component", "main")
+    archs = tuple(apt.get("architectures", ("amd64",)))
+    package_name = apt.get("package_name", project["id"])
+    dist = config.root / build.get("output_dir", "dist")
+    version = project_version(config)
+
     check_tools("dpkg-deb", "dpkg", "gpg")
 
-    debs = find_debs()
+    debs = find_debs(dist, package_name)
     print(f"Found {len(debs)} package(s):")
     for d in debs:
         print(f"  {d.name}")
 
-    repo = tempfile.mkdtemp(prefix="promptr-apt-")
+    repo = tempfile.mkdtemp(prefix=f"{package_name}-apt-")
     repo_path = Path(repo)
     keep = args.dry_run  # keep repo for inspection
     if not keep:
         atexit.register(shutil.rmtree, repo, ignore_errors=True)
     print(f"\nBuilding apt repository in {repo} ...")
-    build_repo(repo_path, debs)
+    build_repo(
+        repo_path,
+        debs,
+        prefix=prefix,
+        component=component,
+        suite=suite,
+        archs=archs,
+        package_name=package_name,
+        origin=apt_hosting.get("origin", project["id"]),
+        label=apt_hosting.get("label", project.get("name", project["id"])),
+    )
 
     if args.serve:
-        serve_repo(repo_path)
+        serve_repo(
+            repo_path,
+            prefix=prefix,
+            suite=suite,
+            component=component,
+            package_name=package_name,
+        )
         return
 
     gpg_key = os.environ.get("GPG_KEY_ID")
     if gpg_key:
-        release_path = repo_path / PREFIX / "dists" / SUITE / "Release"
+        release_path = repo_path / prefix / "dists" / suite / "Release"
         gpg_sign(release_path, gpg_key,
                  os.environ.get("GPG_PASSPHRASE"))
-        export_pubkey(gpg_key, repo_path)
+        export_pubkey(gpg_key, repo_path, prefix)
     else:
         print("Note: GPG_KEY_ID not set, skipping signing.",
               file=sys.stderr)
@@ -255,7 +293,7 @@ def main():
         upload_tree(repo_path)
         print("Done.")
 
-    print(f"\nRepository built for version {VERSION} ({SUITE}).")
+    print(f"\nRepository built for {package_name} {version} ({suite}).")
 
 
 if __name__ == "__main__":
