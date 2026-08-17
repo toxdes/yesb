@@ -1,256 +1,225 @@
 #!/usr/bin/env python3
-"""Build .deb, .rpm, and optionally .AppImage packages for promptr."""
+"""Create release packages for the project mounted at /build."""
 
 import os
-import subprocess
 import shutil
+import subprocess
+import tomllib
 from pathlib import Path
 
-VERSION = Path("/build/VERSION").read_text().strip()
+
+ROOT = Path(os.environ.get("PACKAGE_ROOT", "/build"))
+OUT = Path(os.environ.get("OUTPUT_DIR", "/output"))
 ARCH = os.environ.get("TARGETARCH", "amd64")
 INCLUDE_APPIMAGE = os.environ.get("INCLUDE_APPIMAGE", "")
-OUT = Path("/output")
 
-# ── arch mapping ──────────────────────────────────────────────
+with (ROOT / "release.toml").open("rb") as file:
+    CONFIG = tomllib.load(file)
+
+PROJECT = CONFIG["project"]
+PROJECT_ID = PROJECT["id"]
+VERSION = os.environ.get("VERSION")
+if not VERSION:
+    VERSION = (ROOT / PROJECT["version_file"]).read_text().strip()
+
+PACKAGE = CONFIG.get("package", {})
+BINARY = PACKAGE.get("binary", PROJECT_ID)
 ARCH_MAP = {
     "amd64": {"deb": "amd64", "rpm": "x86_64"},
     "arm64": {"deb": "arm64", "rpm": "aarch64"},
 }
 if ARCH not in ARCH_MAP:
-    print(f"Unknown arch: {ARCH}")
-    exit(1)
+    raise SystemExit(f"Unknown arch: {ARCH}")
 
-deb_arch = ARCH_MAP[ARCH]["deb"]
-rpm_arch = ARCH_MAP[ARCH]["rpm"]
+DEB_ARCH = ARCH_MAP[ARCH]["deb"]
+RPM_ARCH = ARCH_MAP[ARCH]["rpm"]
 
 
-# ── .deb ──────────────────────────────────────────────────────
+def assets_for(kind):
+    return PACKAGE.get(kind, {}).get("assets", [])
+
+
+def install_assets(root, assets):
+    for asset in assets:
+        source = ROOT / asset["source"]
+        destination = root / str(asset["dest"]).lstrip("/")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        destination.chmod(int(asset.get("mode", 0o644)))
+
+
 def build_deb():
-    name = f"promptr_{VERSION}_{deb_arch}"
+    package = CONFIG["deb"]
+    name = f"{package.get('package_name', PROJECT_ID)}_{VERSION}_{DEB_ARCH}"
     pkg = Path("/pkg-deb")
+    (pkg / "DEBIAN").mkdir(parents=True, exist_ok=True)
+    (pkg / "usr/bin").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / BINARY, pkg / "usr/bin" / BINARY)
+    (pkg / "usr/bin" / BINARY).chmod(0o755)
+    install_assets(pkg, assets_for("deb"))
 
-    dirs = [
-        pkg / "DEBIAN",
-        pkg / "usr/bin",
-        pkg / "usr/share/icons/hicolor/scalable/apps",
-        pkg / "usr/share/applications",
-    ]
-    for d in dirs:
-        d.mkdir(parents=True, exist_ok=True)
-
-    shutil.copy("/build/promptr", pkg / "usr/bin/promptr")
-    (pkg / "usr/bin/promptr").chmod(0o755)
-    shutil.copy(
-        "/build/data/promptr.svg",
-        pkg / "usr/share/icons/hicolor/scalable/apps/promptr.svg",
-    )
-    shutil.copy(
-        "/build/com.toxdes.promptr.desktop",
-        pkg / "usr/share/applications/com.toxdes.promptr.desktop",
-    )
-
-    control = f"""\
-Package: promptr
-Version: {VERSION}
-Architecture: {deb_arch}
-Maintainer: toxdes <hi@toxdes.com>
-Section: utils
-Priority: optional
-Depends: libgtk-4-1, libgtksourceview-5-0, libgtk4-layer-shell0
-Description: GTK4 overlay prompt for opencode
- promptr is a GTK4 overlay application for running opencode
- commands through a resizable, always-on-top window.
-"""
+    depends = ", ".join(package.get("depends", []))
+    control = "\n".join([
+        f"Package: {package.get('package_name', PROJECT_ID)}",
+        f"Version: {VERSION}",
+        f"Architecture: {DEB_ARCH}",
+        f"Maintainer: {PROJECT['maintainer']}",
+        f"Section: {package.get('section', 'utils')}",
+        f"Priority: {package.get('priority', 'optional')}",
+        f"Depends: {depends}" if depends else "",
+        f"Description: {PROJECT['description']}",
+        f" {PROJECT['description']}",
+        "",
+    ])
     (pkg / "DEBIAN/control").write_text(control)
-
-    subprocess.run(
-        ["dpkg-deb", "--build", str(pkg), str(OUT / f"{name}.deb")], check=True
-    )
-    print(f"  -> {OUT}/{name}.deb")
+    destination = OUT / f"{name}.deb"
+    subprocess.run(["dpkg-deb", "--build", str(pkg), str(destination)], check=True)
+    print(f"  -> {destination}")
     shutil.rmtree(pkg)
 
 
-# ── .rpm ──────────────────────────────────────────────────────
 def build_rpm():
-    name = f"promptr-{VERSION}-1.{rpm_arch}"
+    package = CONFIG["rpm"]
+    package_name = package.get("package_name", PROJECT_ID)
+    name = f"{package_name}-{VERSION}-{package.get('release', '1')}.{RPM_ARCH}"
     topdir = Path("/tmp/rpm")
+    for directory in ["BUILD", "RPMS", "SOURCES", "SPECS", "SRPMS"]:
+        (topdir / directory).mkdir(parents=True, exist_ok=True)
 
-    for d in ["BUILD", "RPMS", "SOURCES", "SPECS", "SRPMS"]:
-        (topdir / d).mkdir(parents=True, exist_ok=True)
+    assets = assets_for("rpm")
+    directories = {str(Path(asset["dest"]).parent) for asset in assets}
+    mkdirs = " ".join(f"%{{buildroot}}/{directory.lstrip('/')}"
+                       for directory in sorted(directories))
+    installs = []
+    files = []
+    for asset in assets:
+        destination = str(asset["dest"]).lstrip("/")
+        mode = int(asset.get("mode", 0o644))
+        installs.append(
+            f"install -m{mode:o} /build/{asset['source']} "
+            f"%{{buildroot}}/{destination}"
+        )
+        files.append(f"/{destination}")
 
-    spec = f"""\
-Name:           promptr
+    requires = "\n".join(f"Requires:      {value}"
+                          for value in package.get("requires", []))
+    spec = f"""Name:           {package_name}
 Version:        {VERSION}
-Release:        1%{{?dist}}
-Summary:        GTK4 overlay prompt for opencode
-License:        MIT
-BuildArch:      {rpm_arch}
-Requires:       gtk4
-Requires:       gtksourceview5
-Requires:       gtk4-layer-shell
+Release:        {package.get('release', '1')}%{{?dist}}
+Summary:        {PROJECT['description']}
+License:        {PROJECT['license']}
+BuildArch:      {RPM_ARCH}
+{requires}
 
 %description
-promptr is a GTK4 overlay application for running opencode
-commands through a resizable, always-on-top window.
+{PROJECT['description']}
 
 %install
-mkdir -p %{{buildroot}}/usr/bin \\
-         %{{buildroot}}/usr/share/icons/hicolor/scalable/apps \\
-         %{{buildroot}}/usr/share/applications
-install -m755 /build/promptr %{{buildroot}}/usr/bin/promptr
-install -m644 /build/data/promptr.svg \\
-    %{{buildroot}}/usr/share/icons/hicolor/scalable/apps/promptr.svg
-install -m644 /build/com.toxdes.promptr.desktop \\
-    %{{buildroot}}/usr/share/applications/com.toxdes.promptr.desktop
+mkdir -p %{{buildroot}}/usr/bin {mkdirs}
+install -m755 /build/{BINARY} %{{buildroot}}/usr/bin/{BINARY}
+{chr(10).join(installs)}
 
 %files
-/usr/bin/promptr
-/usr/share/icons/hicolor/scalable/apps/promptr.svg
-/usr/share/applications/com.toxdes.promptr.desktop
+/usr/bin/{BINARY}
+{chr(10).join(files)}
 """
-    (topdir / "SPECS/promptr.spec").write_text(spec)
+    spec_path = topdir / "SPECS" / f"{package_name}.spec"
+    spec_path.write_text(spec)
+    subprocess.run([
+        "rpmbuild", "-bb", "--define", f"_topdir {topdir}", str(spec_path)
+    ], check=True)
 
-    subprocess.run(
-        [
-            "rpmbuild",
-            "-bb",
-            "--define",
-            f"_topdir {topdir}",
-            str(topdir / "SPECS/promptr.spec"),
-        ],
-        check=True,
-    )
-
-    src = topdir / "RPMS" / rpm_arch / f"{name}.rpm"
-    shutil.copy(str(src), str(OUT / f"{name}.rpm"))
-    print(f"  -> {OUT}/{name}.rpm")
+    source = topdir / "RPMS" / RPM_ARCH / f"{name}.rpm"
+    destination = OUT / f"{name}.rpm"
+    shutil.copy2(source, destination)
+    print(f"  -> {destination}")
     shutil.rmtree(topdir)
 
 
-# ── .AppImage ─────────────────────────────────────────────────
+def build_tar():
+    name = f"{PROJECT_ID}_{VERSION}_{DEB_ARCH}"
+    pkg = Path("/pkg-tar")
+    (pkg / "usr/bin").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / BINARY, pkg / "usr/bin" / BINARY)
+    (pkg / "usr/bin" / BINARY).chmod(0o755)
+    install_assets(pkg, assets_for("archive"))
+    destination = OUT / f"{name}.tar.gz"
+    subprocess.run(["tar", "-czf", str(destination), "-C", str(pkg), "."], check=True)
+    print(f"  -> {destination}")
+    shutil.rmtree(pkg)
+
+
 def build_appimage():
+    appimage = PACKAGE.get("appimage", {})
     runtime = Path("/usr/local/share/appimage-runtime")
     if not runtime.exists():
         print("  (skip AppImage: runtime not found)")
         return
 
-    SKIP_LIBS = {
-        "ld-linux", "libc.so", "libm.so", "libpthread", "libdl.so",
-        "libstdc++.so", "libgcc_s.so", "libresolv.so", "librt.so",
-        "libutil.so", "libnss_", "libnsl",
-    }
-
-    name = f"promptr-{VERSION}-{ARCH}.AppImage"
     appdir = Path("/tmp/appdir")
-
     (appdir / "usr/bin").mkdir(parents=True, exist_ok=True)
     (appdir / "usr/lib").mkdir(parents=True, exist_ok=True)
     (appdir / "usr/share/glib-2.0/schemas").mkdir(parents=True, exist_ok=True)
-    (appdir / "usr/share/icons").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / BINARY, appdir / "usr/bin" / BINARY)
+    (appdir / "usr/bin" / BINARY).chmod(0o755)
 
-    shutil.copy("/build/promptr", appdir / "usr/bin/promptr")
-    (appdir / "usr/bin/promptr").chmod(0o755)
+    icon = appimage.get("icon")
+    desktop = appimage.get("desktop")
+    if icon:
+        shutil.copy2(ROOT / icon, appdir / Path(icon).name)
+        shutil.copy2(ROOT / icon, appdir / ".DirIcon")
+    if desktop:
+        shutil.copy2(ROOT / desktop, appdir / Path(desktop).name)
 
-    shutil.copy("/build/data/promptr.svg", appdir / "promptr.svg")
-    shutil.copy("/build/data/promptr.svg", appdir / ".DirIcon")
-    shutil.copy(
-        "/build/com.toxdes.promptr.desktop",
-        appdir / "com.toxdes.promptr.desktop",
-    )
-
-    result = subprocess.run(
-        ["ldd", "/build/promptr"], capture_output=True, text=True
-    )
+    skip = ("ld-linux", "libc.so", "libm.so", "libpthread", "libdl.so",
+            "libstdc++.so", "libgcc_s.so", "libresolv.so", "librt.so",
+            "libutil.so", "libnss_", "libnsl")
+    result = subprocess.run(["ldd", str(ROOT / BINARY)],
+                            capture_output=True, text=True, check=True)
     for line in result.stdout.splitlines():
         parts = line.strip().split()
-        if "=>" in parts:
-            idx = parts.index("=>")
-            if idx + 1 < len(parts):
-                libpath = parts[idx + 1]
-                libname = Path(libpath).name
-                skip = False
-                for s in SKIP_LIBS:
-                    if libname.startswith(s):
-                        skip = True
-                        break
-                if not skip and libpath.startswith("/") and Path(libpath).exists():
-                    shutil.copy(libpath, appdir / "usr/lib/")
+        if "=>" not in parts:
+            continue
+        path = Path(parts[parts.index("=>") + 1])
+        if path.is_absolute() and path.exists() and not path.name.startswith(skip):
+            shutil.copy2(path, appdir / "usr/lib")
 
-    schemas_src = Path("/usr/share/glib-2.0/schemas")
-    if schemas_src.exists():
-        for f in schemas_src.glob("org.gtk*"):
-            shutil.copy(f, appdir / "usr/share/glib-2.0/schemas/")
-        for f in schemas_src.glob("gschemas.compiled"):
-            shutil.copy(f, appdir / "usr/share/glib-2.0/schemas/")
-    subprocess.run(
-        ["glib-compile-schemas", str(appdir / "usr/share/glib-2.0/schemas")],
-        check=False,
-    )
+    schemas = Path("/usr/share/glib-2.0/schemas")
+    if schemas.exists():
+        for schema in schemas.glob("org.gtk*"):
+            shutil.copy2(schema, appdir / "usr/share/glib-2.0/schemas")
+        compiled = schemas / "gschemas.compiled"
+        if compiled.exists():
+            shutil.copy2(compiled, appdir / "usr/share/glib-2.0/schemas")
+    subprocess.run(["glib-compile-schemas",
+                    str(appdir / "usr/share/glib-2.0/schemas")], check=False)
 
-    apprun = """\
-#!/bin/bash
+    apprun = f'''#!/bin/bash
 APPDIR="$(dirname "$(readlink -f "$0")")"
-export LD_LIBRARY_PATH="${APPDIR}/usr/lib:${LD_LIBRARY_PATH}"
-export GSETTINGS_SCHEMA_DIR="${APPDIR}/usr/share/glib-2.0/schemas"
+export LD_LIBRARY_PATH="${{APPDIR}}/usr/lib:${{LD_LIBRARY_PATH}}"
+export GSETTINGS_SCHEMA_DIR="${{APPDIR}}/usr/share/glib-2.0/schemas"
 if [ -n "$WAYLAND_DISPLAY" ]; then
     export GDK_BACKEND=wayland
 else
     export GDK_BACKEND=x11
 fi
-exec "${APPDIR}/usr/bin/promptr" "$@"
-"""
+exec "${{APPDIR}}/usr/bin/{BINARY}" "$@"
+'''
     (appdir / "AppRun").write_text(apprun)
     (appdir / "AppRun").chmod(0o755)
 
-    squashed = Path("/tmp/promptr.squashfs")
-    subprocess.run(
-        ["mksquashfs", str(appdir), str(squashed), "-noappend"], check=True
-    )
-
-    dest = OUT / name
-    with open(dest, "wb") as out:
-        out.write(runtime.read_bytes())
-        out.write(squashed.read_bytes())
-    dest.chmod(0o755)
-
-    print(f"  -> {dest}")
+    squashed = Path(f"/tmp/{PROJECT_ID}.squashfs")
+    subprocess.run(["mksquashfs", str(appdir), str(squashed), "-noappend"], check=True)
+    destination = OUT / f"{PROJECT_ID}-{VERSION}-{ARCH}.AppImage"
+    with destination.open("wb") as output:
+        output.write(runtime.read_bytes())
+        output.write(squashed.read_bytes())
+    destination.chmod(0o755)
+    print(f"  -> {destination}")
     shutil.rmtree(appdir)
     squashed.unlink()
 
 
-# ── .tar.gz ────────────────────────────────────────────────────
-def build_tar():
-    name = f"promptr_{VERSION}_{deb_arch}"
-    pkg = Path("/pkg-tar")
-
-    dirs = [
-        pkg / "usr/bin",
-        pkg / "usr/share/icons/hicolor/scalable/apps",
-        pkg / "usr/share/applications",
-    ]
-    for d in dirs:
-        d.mkdir(parents=True, exist_ok=True)
-
-    shutil.copy("/build/promptr", pkg / "usr/bin/promptr")
-    (pkg / "usr/bin/promptr").chmod(0o755)
-    shutil.copy(
-        "/build/data/promptr.svg",
-        pkg / "usr/share/icons/hicolor/scalable/apps/promptr.svg",
-    )
-    shutil.copy(
-        "/build/com.toxdes.promptr.desktop",
-        pkg / "usr/share/applications/com.toxdes.promptr.desktop",
-    )
-
-    subprocess.run(
-        ["tar", "-czf", str(OUT / f"{name}.tar.gz"), "-C", str(pkg), "."],
-        check=True,
-    )
-    print(f"  -> {OUT}/{name}.tar.gz")
-    shutil.rmtree(pkg)
-
-
-# ── main ──────────────────────────────────────────────────────
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     build_deb()
