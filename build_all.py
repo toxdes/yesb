@@ -1,102 +1,126 @@
 #!/usr/bin/env python3
-"""Build promptr binaries and packages for all platforms using Docker buildx.
+"""Build a project's release artifacts with Docker Buildx.
 
 Usage:
-    python3 build-all.py [--include-appimage]
-
-Options:
-    --include-appimage   Also build .AppImage (adds ~100 MB per arch).
-
-Prerequisites:
-    - Docker with buildx support (docker buildx create --use)
-    - QEMU for cross-platform emulation (docker run --rm --privileged multiarch/qemu-user-static --reset -p yes)
-
-Output:
-    dist/  — packages and PKGBUILD for all platforms
+    ./yesb/build_all.py [--project-root PATH] [--include-appimage]
 """
 
+import argparse
 import hashlib
+import shutil
 import subprocess
 import sys
-import shutil
 from pathlib import Path
 
-VERSION = Path("VERSION").read_text().strip()
-DIST = Path("dist")
-PLATFORMS = "linux/amd64,linux/arm64"
+from release_lib import load_config, project_version, run
 
 
-def run(cmd, **kwargs):
-    label = f"  \033[1;36m$\033[m {cmd}"
-    print(label)
-    subprocess.run(cmd, shell=True, check=True, **kwargs)
+def flatten_output(output_dir):
+    """Move files emitted in per-platform directories to output_dir."""
+    for child in sorted(output_dir.iterdir()):
+        if not child.is_dir() or child.name == ".git":
+            continue
+        for artifact in child.iterdir():
+            if artifact.is_file():
+                shutil.move(str(artifact), str(output_dir / artifact.name))
+        child.rmdir()
+
+
+def write_checksums(output_dir):
+    suffixes = (".deb", ".rpm", ".AppImage", ".tar.gz")
+    sums = []
+
+    for artifact in sorted(output_dir.iterdir()):
+        if not artifact.is_file() or not artifact.name.endswith(suffixes):
+            continue
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        line = f"{digest}  {artifact.name}\n"
+        (output_dir / f"{artifact.name}.sha256").write_text(line)
+        sums.append(line.rstrip("\n"))
+
+    if sums:
+        (output_dir / "SHA256SUMS").write_text("\n".join(sums) + "\n")
 
 
 def main():
-    include_appimage = "--include-appimage" in sys.argv
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--project-root",
+        default=".",
+        help="Project directory containing release.toml (default: current directory)",
+    )
+    parser.add_argument(
+        "--include-appimage",
+        action="store_true",
+        help="Request AppImage output from the project Dockerfile",
+    )
+    args = parser.parse_args()
 
-    # Clean output
-    if DIST.exists():
-        shutil.rmtree(DIST)
-    DIST.mkdir()
+    config = load_config(Path(args.project_root) / "release.toml")
+    build = config.section("build")
+    output_dir = config.root / build.get("output_dir", "dist")
+    context = config.root / build.get("context", ".")
+    dockerfile = config.root / build.get("dockerfile", "Dockerfile")
+    platforms = build.get("platforms", ["linux/amd64"])
+    version = project_version(config)
 
-    # Check Docker
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+
     try:
-        run("docker version --format '{{.Server.Version}}'",
+        run(["docker", "version", "--format", "{{.Server.Version}}"],
             capture_output=True)
     except subprocess.CalledProcessError:
-        print("Error: Docker not available")
-        sys.exit(1)
+        print("Error: Docker is not available", file=sys.stderr)
+        return 1
 
-    # Ensure QEMU multiarch support
-    run("docker run --rm --privileged multiarch/qemu-user-static"
-        " --reset -p yes 2>/dev/null; true",
-        capture_output=True)
-
-    # Build for all platforms
-    build_args = (
-        " --platform " + PLATFORMS +
-        " --build-arg BUILD=release"
+    subprocess.run(
+        [
+            "docker", "run", "--rm", "--privileged",
+            "multiarch/qemu-user-static", "--reset", "-p", "yes",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
     )
-    if include_appimage:
-        build_args += " --build-arg INCLUDE_APPIMAGE=1"
 
-    print("\nBuilding for %s ...\n" % PLATFORMS.replace(",", ", "))
-    run("docker buildx build" + build_args +
-        " --output type=local,dest=" + str(DIST) +
-        " --progress=plain"
-        " -f Dockerfile .")
+    build_args = dict(build.get("args", {}))
+    build_args.setdefault("VERSION", version)
+    if args.include_appimage:
+        build_args["INCLUDE_APPIMAGE"] = "1"
 
-    # Flatten: buildx creates subdirs per platform, move files up
-    for pkg_dir in sorted(DIST.iterdir()):
-        if pkg_dir.is_dir() and pkg_dir.name != ".git":
-            for f in pkg_dir.iterdir():
-                if f.is_file():
-                    shutil.move(str(f), str(DIST / f.name))
-            pkg_dir.rmdir()
+    command = [
+        "docker", "buildx", "build",
+        "--platform", ",".join(platforms),
+    ]
+    for key, value in build_args.items():
+        command.extend(["--build-arg", f"{key}={value}"])
+    command.extend([
+        "--output", f"type=local,dest={output_dir}",
+        "--progress=plain",
+        "-f", str(dockerfile),
+        str(context),
+    ])
 
-    # Copy PKGBUILD
-    pkgbuild = Path("PKGBUILD")
-    if pkgbuild.exists():
-        shutil.copy(str(pkgbuild), str(DIST / "PKGBUILD"))
+    print(f"\nBuilding {config.project['id']} for {', '.join(platforms)} ...\n")
+    run(command)
+    flatten_output(output_dir)
 
-    # Generate checksums
-    sums = []
-    for f in sorted(DIST.iterdir()):
-        if f.is_file() and f.name.endswith((".deb", ".rpm", ".AppImage", ".tar.gz")):
-            sha = hashlib.sha256(f.read_bytes()).hexdigest()
-            sums.append(f"{sha}  {f.name}")
-            (DIST / f"{f.name}.sha256").write_text(f"{sha}  {f.name}\n")
+    git_pkgbuild = config.section("aur").get("git_pkgbuild")
+    if git_pkgbuild:
+        source = config.root / git_pkgbuild
+        if source.is_file():
+            shutil.copy2(source, output_dir / source.name)
 
-    if sums:
-        (DIST / "SHA256SUMS").write_text("\n".join(sums) + "\n")
+    write_checksums(output_dir)
 
-    # Summary
-    print("\nPackages (%s):" % DIST)
-    for f in sorted(DIST.iterdir()):
-        if f.is_file():
-            size = f.stat().st_size
-            print(f"  {f.name:<45s}  {size:>8,} bytes")
+    print(f"\nPackages ({output_dir}):")
+    for artifact in sorted(output_dir.iterdir()):
+        if artifact.is_file():
+            print(f"  {artifact.name:<45s} {artifact.stat().st_size:>8,} bytes")
+
+    return 0
 
 
 if __name__ == "__main__":
