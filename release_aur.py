@@ -27,6 +27,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from release_lib import load_env_file, upload_file
+
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 AUR_HOST = "aur.archlinux.org"
@@ -183,55 +185,13 @@ def push_aur(repo_name, pkgbuild_text):
 
 
 def upload_releases():
-    import boto3
-
-    required = ["AWS_ENDPOINT_URL", "AWS_BUCKET",
-                "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
-    missing = [v for v in required if v not in os.environ]
-    if missing:
-        print("Missing env vars: " + ", ".join(missing), file=sys.stderr)
-        sys.exit(1)
-
-    client = boto3.client(
-        "s3",
-        endpoint_url=os.environ["AWS_ENDPOINT_URL"],
-        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-    )
-    bucket = os.environ["AWS_BUCKET"]
-
     for deb_arch in _ARCH_MAP.values():
         tarball = DIST / f"promptr_{VERSION}_{deb_arch}.tar.gz"
         if not tarball.is_file():
             print(f"Error: {tarball} not found", file=sys.stderr)
             sys.exit(1)
         key = f"{RELEASES_PREFIX}/{tarball.name}"
-        client.upload_file(str(tarball), bucket, key)
-        print(f"  {key}")
-
-
-def load_env_file(path):
-    env_file = Path(path)
-    if not env_file.is_file():
-        print(f"Error: {path} not found", file=sys.stderr)
-        sys.exit(1)
-
-    loaded = 0
-    with open(env_file) as f:
-        for lineno, raw in enumerate(f, 1):
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                print(f"Warning: {path}:{lineno} not a KEY=VALUE line, skipping",
-                      file=sys.stderr)
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            if key not in os.environ:
-                os.environ[key] = val.strip()
-                loaded += 1
-    print(f"Loaded {loaded} variable(s) from {path}")
+        upload_file(tarball, key)
 
 
 def release_git():

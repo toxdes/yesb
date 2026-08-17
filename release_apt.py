@@ -26,7 +26,6 @@ import argparse
 import atexit
 import email.parser
 import gzip
-import hashlib
 import http.server
 import os
 import shutil
@@ -35,6 +34,8 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from release_lib import check_tools, compute_hashes, load_env_file, upload_tree
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
@@ -56,23 +57,6 @@ def parse_control(deb_path):
     parser = email.parser.HeaderParser()
     msg = parser.parsestr(result.stdout)
     return dict(msg)
-
-
-def compute_hashes(path):
-    md5 = hashlib.md5()
-    sha1 = hashlib.sha1()
-    sha256 = hashlib.sha256()
-    size = 0
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(65536)
-            if not chunk:
-                break
-            size += len(chunk)
-            md5.update(chunk)
-            sha1.update(chunk)
-            sha256.update(chunk)
-    return md5.hexdigest(), sha1.hexdigest(), sha256.hexdigest(), size
 
 
 def find_debs():
@@ -194,31 +178,6 @@ def export_pubkey(key_id, repo_dir):
     (repo_dir / PREFIX / "pubkey.gpg").write_text(result.stdout)
 
 
-def upload_r2(repo_dir):
-    import boto3
-
-    required = ["AWS_ENDPOINT_URL", "AWS_BUCKET",
-                "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]
-    missing = [v for v in required if v not in os.environ]
-    if missing:
-        print("Missing env vars: " + ", ".join(missing), file=sys.stderr)
-        sys.exit(1)
-
-    client = boto3.client(
-        "s3",
-        endpoint_url=os.environ["AWS_ENDPOINT_URL"],
-        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-    )
-    bucket = os.environ["AWS_BUCKET"]
-
-    for fpath in sorted(repo_dir.rglob("*")):
-        if fpath.is_file():
-            key = str(fpath.relative_to(repo_dir))
-            client.upload_file(str(fpath), bucket, key)
-            print(f"  {key}")
-
-
 def serve_repo(repo_dir):
     os.chdir(repo_dir)
 
@@ -245,37 +204,6 @@ def serve_repo(repo_dir):
         server.shutdown()
 
 
-def load_env_file(path):
-    env_file = Path(path)
-    if not env_file.is_file():
-        print(f"Error: {path} not found", file=sys.stderr)
-        sys.exit(1)
-
-    loaded = 0
-    with open(env_file) as f:
-        for lineno, raw in enumerate(f, 1):
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                print(f"Warning: {path}:{lineno} not a KEY=VALUE line, skipping",
-                      file=sys.stderr)
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            if key not in os.environ:
-                os.environ[key] = value.strip()
-                loaded += 1
-    print(f"Loaded {loaded} variable(s) from {path}")
-
-
-def check_tools():
-    for tool in ("dpkg-deb", "dpkg", "gpg"):
-        if subprocess.run(["which", tool], capture_output=True).returncode != 0:
-            print(f"Error: {tool} not found", file=sys.stderr)
-            sys.exit(1)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Publish apt repo to R2")
     parser.add_argument("--env", metavar="PATH",
@@ -290,7 +218,7 @@ def main():
     if args.env:
         load_env_file(args.env)
 
-    check_tools()
+    check_tools("dpkg-deb", "dpkg", "gpg")
 
     debs = find_debs()
     print(f"Found {len(debs)} package(s):")
@@ -324,7 +252,7 @@ def main():
         print(f"Repository at: {repo}")
     else:
         print("Uploading to R2 ...")
-        upload_r2(repo_path)
+        upload_tree(repo_path)
         print("Done.")
 
     print(f"\nRepository built for version {VERSION} ({SUITE}).")
