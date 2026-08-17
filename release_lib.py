@@ -5,7 +5,61 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class ProjectConfig:
+    """Loaded project manifest and the directory containing it."""
+
+    data: dict
+    path: Path
+
+    @property
+    def root(self):
+        return self.path.parent
+
+    @property
+    def project(self):
+        return self.data["project"]
+
+    def section(self, name):
+        return self.data.get(name, {})
+
+
+def load_config(path=None):
+    """Load and minimally validate a project's release.toml."""
+    config_path = Path(path or "release.toml").resolve()
+    if not config_path.is_file():
+        print(f"Error: {config_path} not found", file=sys.stderr)
+        sys.exit(1)
+
+    with config_path.open("rb") as file:
+        data = tomllib.load(file)
+
+    project = data.get("project")
+    if not isinstance(project, dict):
+        print(f"Error: {config_path} is missing [project]", file=sys.stderr)
+        sys.exit(1)
+
+    missing = [name for name in ("id", "version_file") if name not in project]
+    if missing:
+        names = ", ".join(missing)
+        print(f"Error: [project] is missing: {names}", file=sys.stderr)
+        sys.exit(1)
+
+    return ProjectConfig(data=data, path=config_path)
+
+
+def project_version(config):
+    """Read the project version using the configured version file."""
+    version_path = config.root / config.project["version_file"]
+    if not version_path.is_file():
+        print(f"Error: version file {version_path} not found", file=sys.stderr)
+        sys.exit(1)
+    return version_path.read_text().strip()
 
 
 def compute_hashes(path):
