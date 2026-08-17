@@ -38,6 +38,7 @@ from pathlib import Path
 from release_lib import (
     check_tools,
     compute_hashes,
+    acquire_r2_lock,
     download_optional,
     load_config,
     load_env_file,
@@ -305,6 +306,8 @@ def main():
     existing = {}
     existing_dir = None
     if not args.dry_run and not args.serve:
+        release_lock = acquire_r2_lock(f"{prefix}/.publish.lock")
+        atexit.register(release_lock)
         print("Reading existing shared package indexes from R2 ...")
         existing_dir = Path(tempfile.mkdtemp(prefix=f"{package_name}-apt-existing-"))
         atexit.register(shutil.rmtree, existing_dir, ignore_errors=True)

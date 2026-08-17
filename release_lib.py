@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -160,6 +161,57 @@ def download_optional(key, path):
             return False
         raise
     return True
+
+
+def acquire_r2_lock(key, *, max_age=1800):
+    """Acquire an expiring single-writer lock in R2.
+
+    R2 conditional creation makes competing publishers fail instead of
+    publishing from stale metadata. A stale lock from a crashed publisher is
+    recoverable after max_age seconds.
+    """
+    import time
+
+    client, bucket = r2_client()
+    token = uuid.uuid4().hex
+
+    for attempt in range(2):
+        try:
+            client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=token.encode(),
+                IfNoneMatch="*",
+                ContentType="text/plain",
+            )
+            print(f"Acquired R2 publish lock: {key}")
+
+            def release():
+                current = client.get_object(Bucket=bucket, Key=key)
+                owner = current["Body"].read().decode()
+                if owner == token:
+                    client.delete_object(Bucket=bucket, Key=key)
+                    print(f"Released R2 publish lock: {key}")
+
+            return release
+        except Exception as error:
+            response = getattr(error, "response", {})
+            code = response.get("Error", {}).get("Code")
+            if code not in {"PreconditionFailed", "412"}:
+                raise
+
+            head = client.head_object(Bucket=bucket, Key=key)
+            age = time.time() - head["LastModified"].timestamp()
+            if age <= max_age:
+                raise RuntimeError(
+                    f"R2 publish lock is held: {key} "
+                    f"({int(max_age - age)}s remaining)"
+                ) from error
+
+            print(f"Removing stale R2 publish lock: {key}")
+            client.delete_object(Bucket=bucket, Key=key)
+
+    raise RuntimeError(f"Could not acquire R2 publish lock: {key}")
 
 
 def upload_tree(root_dir):
