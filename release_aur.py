@@ -40,7 +40,7 @@ pkgrel=1
 pkgdesc="{description}"
 arch=('x86_64' 'aarch64')
 url="{url}"
-license=('MIT')
+license=('{license}')
 depends=({depends})
 
 source_x86_64=("{project_id}-${{pkgver}}-x86_64.tar.gz::{release_url}/{project_id}_${{pkgver}}_amd64.tar.gz")
@@ -242,6 +242,7 @@ def release_bin(config, version, *, aur_host, aur_user, maintainer):
         version=version,
         description=description,
         url=project.get("homepage", project.get("repository", "")),
+        license=project.get("license", "custom"),
         project_id=project_id,
         release_url=release_url,
         depends=depends,
