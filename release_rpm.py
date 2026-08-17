@@ -32,25 +32,24 @@ import sys
 import tempfile
 from pathlib import Path
 
-from release_lib import check_tools, load_env_file, upload_tree
+from release_lib import (
+    check_tools,
+    load_config,
+    load_env_file,
+    project_version,
+    upload_tree,
+)
 
-ROOT = Path(__file__).resolve().parent
-DIST = ROOT / "dist"
-VERSION = (ROOT / "VERSION").read_text().strip()
-
-PREFIX = "rpm"
-
-
-def find_rpms():
-    rpms = sorted(DIST.glob("promptr-*.rpm"))
+def find_rpms(dist, package_name):
+    rpms = sorted(dist.glob(f"{package_name}-*.rpm"))
     if not rpms:
-        print("No .rpm files found in dist/", file=sys.stderr)
+        print(f"No {package_name} .rpm files found in {dist}/", file=sys.stderr)
         sys.exit(1)
     return rpms
 
 
-def build_repo(root_dir, rpms):
-    rpm_dir = root_dir / PREFIX
+def build_repo(root_dir, rpms, prefix):
+    rpm_dir = root_dir / prefix
     rpm_dir.mkdir(parents=True, exist_ok=True)
 
     for rpm in rpms:
@@ -100,15 +99,15 @@ def gpg_sign_repomd(repomd_path, key_id, passphrase=None):
     )
 
 
-def export_pubkey(key_id, repo_dir):
+def export_pubkey(key_id, repo_dir, prefix):
     result = subprocess.run(
         ["gpg", "--export", "--armor", key_id],
         capture_output=True, text=True, check=True,
     )
-    (repo_dir / PREFIX / "pubkey.gpg").write_text(result.stdout)
+    (repo_dir / prefix / "pubkey.gpg").write_text(result.stdout)
 
 
-def serve_repo(repo_dir):
+def serve_repo(repo_dir, *, prefix, package_name):
     os.chdir(repo_dir)
 
     host = "0.0.0.0"
@@ -120,11 +119,11 @@ def serve_repo(repo_dir):
     print("  dnf install -y dnf-plugins-core")
     print(f"  tee /etc/yum.repos.d/promptr.repo <<'EOF'")
     print("[promptr]")
-    print(f"baseurl=http://localhost:{port}/{PREFIX}")
+    print(f"baseurl=http://localhost:{port}/{prefix}")
     print("gpgcheck=0")
     print("enabled=1")
     print("EOF")
-    print("  dnf install promptr")
+    print(f"  dnf install {package_name}")
     print()
     print("Press Ctrl+C to stop.")
 
@@ -142,6 +141,8 @@ def main():
     parser = argparse.ArgumentParser(description="Publish RPM repo to R2")
     parser.add_argument("--env", metavar="PATH",
                         help="Load env vars from file (KEY=VALUE per line)")
+    parser.add_argument("--project-root", default=".",
+                        help="Project directory containing release.toml")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
                       help="Build repo locally, skip upload")
@@ -152,35 +153,45 @@ def main():
     if args.env:
         load_env_file(args.env)
 
+    config = load_config(Path(args.project_root) / "release.toml")
+    project = config.project
+    build = config.section("build")
+    rpm = config.section("rpm")
+    hosting = config.section("hosting")
+    prefix = hosting.get("rpm_prefix", "rpm")
+    package_name = rpm.get("package_name", project["id"])
+    dist = config.root / build.get("output_dir", "dist")
+    version = project_version(config)
+
     check_tools("createrepo_c", "gpg", "rpmsign")
 
     gpg_key = os.environ.get("GPG_KEY_ID")
     if gpg_key and os.environ.get("GPG_PASSPHRASE"):
         pre_cache_gpg_key(gpg_key, os.environ["GPG_PASSPHRASE"])
 
-    rpms = find_rpms()
+    rpms = find_rpms(dist, package_name)
     print(f"Found {len(rpms)} package(s):")
     for r in rpms:
         print(f"  {r.name}")
 
-    repo = tempfile.mkdtemp(prefix="promptr-rpm-")
+    repo = tempfile.mkdtemp(prefix=f"{package_name}-rpm-")
     repo_path = Path(repo)
     keep = args.dry_run
     if not keep:
         atexit.register(shutil.rmtree, repo, ignore_errors=True)
     print(f"\nBuilding RPM repository in {repo} ...")
-    build_repo(repo_path, rpms)
+    build_repo(repo_path, rpms, prefix)
 
     if args.serve:
-        serve_repo(repo_path)
+        serve_repo(repo_path, prefix=prefix, package_name=package_name)
         return
 
     gpg_key = os.environ.get("GPG_KEY_ID")
     if gpg_key:
-        repomd = repo_path / PREFIX / "repodata" / "repomd.xml"
+        repomd = repo_path / prefix / "repodata" / "repomd.xml"
         gpg_sign_repomd(repomd, gpg_key,
                         os.environ.get("GPG_PASSPHRASE"))
-        export_pubkey(gpg_key, repo_path)
+        export_pubkey(gpg_key, repo_path, prefix)
     else:
         print("Note: GPG_KEY_ID not set, skipping signing.",
               file=sys.stderr)
@@ -193,7 +204,7 @@ def main():
         upload_tree(repo_path)
         print("Done.")
 
-    print(f"\nRepository built for version {VERSION}.")
+    print(f"\nRepository built for {package_name} {version}.")
 
 
 if __name__ == "__main__":
