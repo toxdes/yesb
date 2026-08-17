@@ -147,6 +147,21 @@ def upload_file(path, key):
     print(f"  {key}")
 
 
+def download_optional(key, path):
+    """Download an R2 object, returning False when it does not exist."""
+    client, bucket = r2_client()
+    try:
+        client.download_file(bucket, key, str(path))
+    except client.exceptions.NoSuchKey:
+        return False
+    except Exception as error:
+        response = getattr(error, "response", {})
+        if response.get("Error", {}).get("Code") in {"404", "NoSuchKey"}:
+            return False
+        raise
+    return True
+
+
 def upload_tree(root_dir):
     """Upload every file below root_dir using paths relative to root_dir."""
     client, bucket = r2_client()

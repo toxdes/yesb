@@ -38,11 +38,59 @@ from pathlib import Path
 from release_lib import (
     check_tools,
     compute_hashes,
+    download_optional,
     load_config,
     load_env_file,
     project_version,
     upload_tree,
 )
+
+
+def parse_packages(content):
+    """Return package stanzas keyed by package and architecture."""
+    stanzas = {}
+    for raw in content.split("\n\n"):
+        stanza = raw.strip()
+        if not stanza:
+            continue
+        fields = {}
+        for line in stanza.splitlines():
+            if ": " in line:
+                key, value = line.split(": ", 1)
+                fields[key] = value
+        identity = (
+            fields.get("Package"),
+            fields.get("Architecture"),
+        )
+        if all(identity) and fields.get("Version"):
+            stanzas[identity] = stanza
+    return stanzas
+
+
+def merge_packages(existing, current):
+    """Merge package indexes, with the current project's version taking precedence."""
+    merged = parse_packages(existing)
+    merged.update(parse_packages(current))
+    return "\n\n".join(
+        merged[key] for key in sorted(merged)
+    ) + ("\n" if merged else "")
+
+
+def load_existing_packages(prefix, suite, component, archs, destination):
+    """Fetch shared indexes without downloading any package payloads."""
+    indexes = {}
+    for arch in archs:
+        key_base = (
+            f"{prefix}/dists/{suite}/{component}/binary-{arch}/Packages"
+        )
+        plain_path = destination / f"Packages-{arch}"
+        gzip_path = destination / f"Packages-{arch}.gz"
+        if download_optional(key_base, plain_path):
+            indexes[arch] = plain_path.read_text()
+        elif download_optional(key_base + ".gz", gzip_path):
+            with gzip.open(gzip_path, "rt") as file:
+                indexes[arch] = file.read()
+    return indexes
 
 def parse_control(deb_path):
     result = subprocess.run(
@@ -63,7 +111,7 @@ def find_debs(dist, package_name):
 
 
 def build_repo(root_dir, debs, *, prefix, component, suite, archs, package_name,
-               origin, label):
+               origin, label, existing_packages=None):
     prefix_dir = root_dir / prefix
     pool_dir = prefix_dir / "pool" / component / package_name[0] / package_name
     pool_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +148,8 @@ def build_repo(root_dir, debs, *, prefix, component, suite, archs, package_name,
             ))
 
         content = "\n\n".join(entries) + "\n"
+        if existing_packages and arch in existing_packages:
+            content = merge_packages(existing_packages[arch], content)
         (bins_dir / "Packages").write_text(content)
         with gzip.open(bins_dir / "Packages.gz", "wt") as fp:
             fp.write(content)
@@ -252,6 +302,15 @@ def main():
     keep = args.dry_run  # keep repo for inspection
     if not keep:
         atexit.register(shutil.rmtree, repo, ignore_errors=True)
+    existing = {}
+    existing_dir = None
+    if not args.dry_run and not args.serve:
+        print("Reading existing shared package indexes from R2 ...")
+        existing_dir = Path(tempfile.mkdtemp(prefix=f"{package_name}-apt-existing-"))
+        atexit.register(shutil.rmtree, existing_dir, ignore_errors=True)
+        existing = load_existing_packages(
+            prefix, suite, component, archs, existing_dir,
+        )
     print(f"\nBuilding apt repository in {repo} ...")
     build_repo(
         repo_path,
@@ -263,6 +322,7 @@ def main():
         package_name=package_name,
         origin=apt_hosting.get("origin", project["id"]),
         label=apt_hosting.get("label", project.get("name", project["id"])),
+        existing_packages=existing,
     )
 
     if args.serve:
