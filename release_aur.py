@@ -82,9 +82,9 @@ def clone_or_pull(repo_name, workdir, aur_host, aur_user):
     aur_url = f"{aur_user}@{aur_host}:{repo_name}.git"
 
     if (repo_path / ".git").exists():
-        run(f"git -C {repo_path} pull --rebase", cwd=workdir)
+        run(["git", "-C", str(repo_path), "pull", "--rebase"], cwd=workdir)
     else:
-        run(f"git clone {aur_url} {repo_path}", cwd=workdir)
+        run(["git", "clone", "--", aur_url, str(repo_path)], cwd=workdir)
     return repo_path
 
 
@@ -94,26 +94,40 @@ def push_aur(repo_name, pkgbuild_text, *, aur_host, aur_user, maintainer,
         workdir = Path(tmp)
         repo = clone_or_pull(repo_name, workdir, aur_host, aur_user)
 
+        old_pkg = (
+            (repo / "PKGBUILD").read_text() if (repo / "PKGBUILD").exists() else ""
+        )
+        old_src = (
+            (repo / ".SRCINFO").read_text() if (repo / ".SRCINFO").exists() else ""
+        )
+
         pkgbuild_text = pkgbuild_text.rstrip("\n") + "\n"
-        srcinfo = generate_srcinfo(pkgbuild_text)
+        (repo / "PKGBUILD").write_text(pkgbuild_text)
+        srcinfo = generate_srcinfo(repo)
 
-        old_pkg = (repo / "PKGBUILD").read_text() if (repo / "PKGBUILD").exists() else ""
-        old_src = (repo / ".SRCINFO").read_text() if (repo / ".SRCINFO").exists() else ""
-
-        if old_pkg.rstrip() == pkgbuild_text.rstrip() and old_src.rstrip() == srcinfo.rstrip():
+        if (
+            old_pkg.rstrip() == pkgbuild_text.rstrip()
+            and old_src.rstrip() == srcinfo.rstrip()
+        ):
             print(f"  -> AUR {repo_name}: no changes, skipping")
             return
 
-        (repo / "PKGBUILD").write_text(pkgbuild_text)
         (repo / ".SRCINFO").write_text(srcinfo)
 
-        run(f'git -C {repo} add PKGBUILD .SRCINFO')
-        subprocess.run(
-            f'git -C {repo} commit --author "{maintainer}" '
-            f'-m "Release {version}"',
-            shell=True,
+        run(["git", "-C", str(repo), "add", "PKGBUILD", ".SRCINFO"])
+        run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "commit",
+                "--author",
+                maintainer,
+                "-m",
+                f"Release {version}",
+            ]
         )
-        run(f"git -C {repo} push -u origin HEAD:master")
+        run(["git", "-C", str(repo), "push", "-u", "origin", "HEAD:master"])
 
 
 def upload_releases(config, version):
