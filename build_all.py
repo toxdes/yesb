@@ -10,6 +10,7 @@ import hashlib
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from release_lib import load_config, project_path, project_version, run, validate_config
@@ -88,6 +89,28 @@ def check_builder_platforms(platforms):
         )
 
 
+def replace_output(source, destination):
+    """Replace the prior output only after the new build is complete."""
+    backup = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}-backup-", dir=destination.parent)
+    )
+    backup.rmdir()
+    had_destination = destination.exists()
+    try:
+        if had_destination:
+            destination.rename(backup)
+        source.rename(destination)
+    except Exception:
+        if had_destination and backup.exists() and not destination.exists():
+            backup.rename(destination)
+        raise
+    if had_destination:
+        if backup.is_dir():
+            shutil.rmtree(backup)
+        else:
+            backup.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -124,10 +147,6 @@ def main():
     platforms = build.get("platforms", ["linux/amd64"])
     version = project_version(config)
 
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True)
-
     try:
         run(
             ["docker", "version", "--format", "{{.Server.Version}}"],
@@ -139,36 +158,52 @@ def main():
         print(f"Error: Docker Buildx is not ready: {error}", file=sys.stderr)
         return 1
 
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output = Path(
+        tempfile.mkdtemp(prefix=f".{output_dir.name}-build-", dir=output_dir.parent)
+    )
+
     build_args = dict(build.get("args", {}))
     build_args.setdefault("VERSION", version)
     build_args.setdefault("GIT_SHA", git_revision(context))
     if args.include_appimage:
         build_args["INCLUDE_APPIMAGE"] = "1"
-
     command = [
-        "docker", "buildx", "build",
-        "--platform", ",".join(platforms),
+        "docker",
+        "buildx",
+        "build",
+        "--platform",
+        ",".join(platforms),
     ]
     for key, value in build_args.items():
         command.extend(["--build-arg", f"{key}={value}"])
-    command.extend([
-        "--output", f"type=local,dest={output_dir}",
-        "--progress=plain",
-        "-f", str(dockerfile),
-        str(context),
-    ])
+    command.extend(
+        [
+            "--output",
+            f"type=local,dest={temporary_output}",
+            "--progress=plain",
+            "-f",
+            str(dockerfile),
+            str(context),
+        ]
+    )
 
-    print(f"\nBuilding {config.project['id']} for {', '.join(platforms)} ...\n")
-    run(command)
-    flatten_output(output_dir)
+    try:
+        print(f"\nBuilding {config.project['id']} for {', '.join(platforms)} ...\n")
+        run(command)
+        flatten_output(temporary_output)
+        git_pkgbuild = config.section("aur").get("git_pkgbuild")
+        if git_pkgbuild:
+            source = project_path(
+                config, git_pkgbuild, "[aur].git_pkgbuild", kind="file"
+            )
+            shutil.copy2(source, temporary_output / source.name)
 
-    git_pkgbuild = config.section("aur").get("git_pkgbuild")
-    if git_pkgbuild:
-        source = config.root / git_pkgbuild
-        if source.is_file():
-            shutil.copy2(source, output_dir / source.name)
-
-    write_checksums(output_dir)
+        write_checksums(temporary_output)
+        replace_output(temporary_output, output_dir)
+    finally:
+        if temporary_output.exists():
+            shutil.rmtree(temporary_output)
 
     print(f"\nPackages ({output_dir}):")
     for artifact in sorted(output_dir.iterdir()):
