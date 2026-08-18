@@ -9,9 +9,9 @@
 Uploads under "apt/" prefix (including pubkey.gpg).
 
 Usage:
-    ./release-apt.py              # build repo, sign, upload to R2
-    ./release-apt.py --dry-run    # build repo locally, skip upload
-    ./release-apt.py --serve      # build repo and serve via HTTP for testing
+    ./release_apt.py              # build repo, sign, upload to R2
+    ./release_apt.py --dry-run    # build repo locally, skip upload
+    ./release_apt.py --serve      # build repo and serve via HTTP for testing
 
 Environment:
     AWS_ACCESS_KEY_ID         Cloudflare R2 access key
@@ -74,18 +74,14 @@ def merge_packages(existing, current):
     """Merge package indexes, with the current project's version taking precedence."""
     merged = parse_packages(existing)
     merged.update(parse_packages(current))
-    return "\n\n".join(
-        merged[key] for key in sorted(merged)
-    ) + ("\n" if merged else "")
+    return "\n\n".join(merged[key] for key in sorted(merged)) + ("\n" if merged else "")
 
 
 def load_existing_packages(prefix, suite, component, archs, destination):
     """Fetch shared indexes without downloading any package payloads."""
     indexes = {}
     for arch in archs:
-        key_base = (
-            f"{prefix}/dists/{suite}/{component}/binary-{arch}/Packages"
-        )
+        key_base = f"{prefix}/dists/{suite}/{component}/binary-{arch}/Packages"
         plain_path = destination / f"Packages-{arch}"
         gzip_path = destination / f"Packages-{arch}.gz"
         if download_optional(key_base, plain_path):
@@ -164,8 +160,7 @@ def build_repo(
         bins_dir = prefix_dir / "dists" / suite / component / f"binary-{arch}"
         bins_dir.mkdir(parents=True, exist_ok=True)
 
-        arch_debs = [pool_dir / d.name for d in debs
-                     if d.name.endswith(f"_{arch}.deb")]
+        arch_debs = [pool_dir / d.name for d in debs if d.name.endswith(f"_{arch}.deb")]
         if not arch_debs:
             continue
 
@@ -173,8 +168,7 @@ def build_repo(
         for deb_path in sorted(arch_debs):
             control = parse_control(deb_path)
             rel_name = (
-                f"pool/{component}/{package_name[0]}/{package_name}/"
-                f"{deb_path.name}"
+                f"pool/{component}/{package_name[0]}/{package_name}/{deb_path.name}"
             )
             md5, sha1, sha256, size = compute_hashes(deb_path)
 
@@ -184,9 +178,7 @@ def build_repo(
             control["SHA1"] = sha1
             control["SHA256"] = sha256
 
-            entries.append("\n".join(
-                f"{k}: {v}" for k, v in control.items()
-            ))
+            entries.append("\n".join(f"{k}: {v}" for k, v in control.items()))
 
         content = "\n\n".join(entries) + "\n"
         if existing_packages and arch in existing_packages:
@@ -256,21 +248,37 @@ def gpg_sign(release_path, key_id, passphrase=None):
         sp_args["input"] = passphrase.encode()
 
     subprocess.run(
-        cmd + ["--clearsign", "--armor", "-o",
-               str(dist_dir / "InRelease"), str(release_path)],
-        check=True, **sp_args,
+        cmd
+        + [
+            "--clearsign",
+            "--armor",
+            "-o",
+            str(dist_dir / "InRelease"),
+            str(release_path),
+        ],
+        check=True,
+        **sp_args,
     )
     subprocess.run(
-        cmd + ["--detach-sign", "--armor", "-o",
-               str(dist_dir / "Release.gpg"), str(release_path)],
-        check=True, **sp_args,
+        cmd
+        + [
+            "--detach-sign",
+            "--armor",
+            "-o",
+            str(dist_dir / "Release.gpg"),
+            str(release_path),
+        ],
+        check=True,
+        **sp_args,
     )
 
 
 def export_pubkey(key_id, repo_dir, prefix):
     result = subprocess.run(
         ["gpg", "--export", "--armor", key_id],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     (repo_dir / prefix / "pubkey.gpg").write_text(result.stdout)
 
@@ -284,15 +292,18 @@ def serve_repo(repo_dir, *, prefix, suite, component, package_name):
     print("Test with:\n")
     print("  docker run --network=host --rm -it debian:bookworm bash")
     print("  # Inside container:")
-    print(f"  echo 'deb [trusted=yes] http://localhost:{port}/{prefix} "
-          f"{suite} {component}' \\")
+    print(
+        f"  echo 'deb [trusted=yes] http://localhost:{port}/{prefix} "
+        f"{suite} {component}' \\"
+    )
     print(f"    > /etc/apt/sources.list.d/{package_name}.list")
     print(f"  apt update && apt install {package_name}")
     print()
     print("Press Ctrl+C to stop.")
 
     server = http.server.HTTPServer(
-        (host, port), http.server.SimpleHTTPRequestHandler,
+        (host, port),
+        http.server.SimpleHTTPRequestHandler,
     )
     try:
         server.serve_forever()
@@ -303,15 +314,24 @@ def serve_repo(repo_dir, *, prefix, suite, component, package_name):
 
 def main():
     parser = argparse.ArgumentParser(description="Publish apt repo to R2")
-    parser.add_argument("--env", metavar="PATH",
-                        help="Load env vars from file (KEY=VALUE per line)")
-    parser.add_argument("--project-root", default=".",
-                        help="Project directory containing release.toml")
+    parser.add_argument(
+        "--env", metavar="PATH", help="Load env vars from file (KEY=VALUE per line)"
+    )
+    parser.add_argument(
+        "--project-root", default=".", help="Project directory containing release.toml"
+    )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true",
-                      help="Build repo locally, skip upload")
-    mode.add_argument("--serve", action="store_true",
-                      help="Build repo and serve via HTTP for testing")
+    mode.add_argument(
+        "--dry-run", action="store_true", help="Build repo locally, skip upload"
+    )
+    mode.add_argument(
+        "--serve", action="store_true", help="Build repo and serve via HTTP for testing"
+    )
+    parser.add_argument(
+        "--allow-unsigned",
+        action="store_true",
+        help="Allow a production upload without GPG signatures",
+    )
     args = parser.parse_args()
 
     if args.env:
@@ -339,6 +359,16 @@ def main():
     for d in debs:
         print(f"  {d.name}")
 
+    gpg_key = os.environ.get("GPG_KEY_ID")
+    publishing = not args.dry_run and not args.serve
+    if publishing and not gpg_key and not args.allow_unsigned:
+        print(
+            "Error: GPG_KEY_ID is required for publishing; "
+            "pass --allow-unsigned to override",
+            file=sys.stderr,
+        )
+        return 1
+
     repo = tempfile.mkdtemp(prefix=f"{package_name}-apt-")
     repo_path = Path(repo)
     keep = args.dry_run  # keep repo for inspection
@@ -353,7 +383,11 @@ def main():
         existing_dir = Path(tempfile.mkdtemp(prefix=f"{package_name}-apt-existing-"))
         atexit.register(shutil.rmtree, existing_dir, ignore_errors=True)
         existing = load_existing_packages(
-            prefix, suite, component, archs, existing_dir,
+            prefix,
+            suite,
+            component,
+            archs,
+            existing_dir,
         )
     print(f"\nBuilding apt repository in {repo} ...")
     build_repo(
@@ -379,15 +413,12 @@ def main():
         )
         return
 
-    gpg_key = os.environ.get("GPG_KEY_ID")
     if gpg_key:
         release_path = repo_path / prefix / "dists" / suite / "Release"
-        gpg_sign(release_path, gpg_key,
-                 os.environ.get("GPG_PASSPHRASE"))
+        gpg_sign(release_path, gpg_key, os.environ.get("GPG_PASSPHRASE"))
         export_pubkey(gpg_key, repo_path, prefix)
     else:
-        print("Note: GPG_KEY_ID not set, skipping signing.",
-              file=sys.stderr)
+        print("Note: GPG_KEY_ID not set, skipping signing.", file=sys.stderr)
 
     if args.dry_run:
         print("Dry run — skipping upload.")
@@ -401,4 +432,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -9,9 +9,9 @@
 Uploads under "rpm/" prefix (including pubkey.gpg).
 
 Usage:
-    ./release-rpm.py              # build repo, sign, upload to R2
-    ./release-rpm.py --dry-run    # build repo locally, skip upload
-    ./release-rpm.py --serve      # build repo and serve via HTTP for testing
+    ./release_rpm.py              # build repo, sign, upload to R2
+    ./release_rpm.py --dry-run    # build repo locally, skip upload
+    ./release_rpm.py --serve      # build repo and serve via HTTP for testing
 
 Environment:
     AWS_ACCESS_KEY_ID         Cloudflare R2 access key
@@ -123,16 +123,18 @@ def gpg_sign_repomd(repomd_path, key_id, passphrase=None):
 
     asc_path = repomd_path.parent / "repomd.xml.asc"
     subprocess.run(
-        cmd + ["--detach-sign", "--armor", "-o",
-               str(asc_path), str(repomd_path)],
-        check=True, **sp_args,
+        cmd + ["--detach-sign", "--armor", "-o", str(asc_path), str(repomd_path)],
+        check=True,
+        **sp_args,
     )
 
 
 def export_pubkey(key_id, repo_dir, prefix):
     result = subprocess.run(
         ["gpg", "--export", "--armor", key_id],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     (repo_dir / prefix / "pubkey.gpg").write_text(result.stdout)
 
@@ -147,7 +149,7 @@ def serve_repo(repo_dir, *, prefix, package_name):
     print("  docker run --network=host --rm -it fedora:latest bash")
     print("  # Inside container:")
     print("  dnf install -y dnf-plugins-core")
-    print(f"  tee /etc/yum.repos.d/promptr.repo <<'EOF'")
+    print("  tee /etc/yum.repos.d/promptr.repo <<'EOF'")
     print("[promptr]")
     print(f"baseurl=http://localhost:{port}/{prefix}")
     print("gpgcheck=0")
@@ -158,7 +160,8 @@ def serve_repo(repo_dir, *, prefix, package_name):
     print("Press Ctrl+C to stop.")
 
     server = http.server.HTTPServer(
-        (host, port), http.server.SimpleHTTPRequestHandler,
+        (host, port),
+        http.server.SimpleHTTPRequestHandler,
     )
     try:
         server.serve_forever()
@@ -169,15 +172,24 @@ def serve_repo(repo_dir, *, prefix, package_name):
 
 def main():
     parser = argparse.ArgumentParser(description="Publish RPM repo to R2")
-    parser.add_argument("--env", metavar="PATH",
-                        help="Load env vars from file (KEY=VALUE per line)")
-    parser.add_argument("--project-root", default=".",
-                        help="Project directory containing release.toml")
+    parser.add_argument(
+        "--env", metavar="PATH", help="Load env vars from file (KEY=VALUE per line)"
+    )
+    parser.add_argument(
+        "--project-root", default=".", help="Project directory containing release.toml"
+    )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true",
-                      help="Build repo locally, skip upload")
-    mode.add_argument("--serve", action="store_true",
-                      help="Build repo and serve via HTTP for testing")
+    mode.add_argument(
+        "--dry-run", action="store_true", help="Build repo locally, skip upload"
+    )
+    mode.add_argument(
+        "--serve", action="store_true", help="Build repo and serve via HTTP for testing"
+    )
+    parser.add_argument(
+        "--allow-unsigned",
+        action="store_true",
+        help="Allow a production upload without GPG signatures",
+    )
     args = parser.parse_args()
 
     if args.env:
@@ -207,6 +219,16 @@ def main():
     for r in rpms:
         print(f"  {r.name}")
 
+    gpg_key = os.environ.get("GPG_KEY_ID")
+    publishing = not args.dry_run and not args.serve
+    if publishing and not gpg_key and not args.allow_unsigned:
+        print(
+            "Error: GPG_KEY_ID is required for publishing; "
+            "pass --allow-unsigned to override",
+            file=sys.stderr,
+        )
+        return 1
+
     repo = tempfile.mkdtemp(prefix=f"{package_name}-rpm-")
     repo_path = Path(repo)
     keep = args.dry_run
@@ -226,15 +248,12 @@ def main():
         serve_repo(repo_path, prefix=prefix, package_name=package_name)
         return
 
-    gpg_key = os.environ.get("GPG_KEY_ID")
     if gpg_key:
         repomd = repo_path / prefix / "repodata" / "repomd.xml"
-        gpg_sign_repomd(repomd, gpg_key,
-                        os.environ.get("GPG_PASSPHRASE"))
+        gpg_sign_repomd(repomd, gpg_key, os.environ.get("GPG_PASSPHRASE"))
         export_pubkey(gpg_key, repo_path, prefix)
     else:
-        print("Note: GPG_KEY_ID not set, skipping signing.",
-              file=sys.stderr)
+        print("Note: GPG_KEY_ID not set, skipping signing.", file=sys.stderr)
 
     if args.dry_run:
         print("Dry run — skipping upload.")
@@ -248,4 +267,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
