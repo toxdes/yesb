@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from release_lib import load_config, project_version, run
+from release_lib import load_config, project_path, project_version, run, validate_config
 
 
 def flatten_output(output_dir):
@@ -68,10 +68,24 @@ def main():
     args = parser.parse_args()
 
     config = load_config(Path(args.project_root) / "release.toml")
+    validate_config(config, "build")
     build = config.section("build")
-    output_dir = config.root / build.get("output_dir", "dist")
-    context = config.root / build.get("context", ".")
-    dockerfile = config.root / build.get("dockerfile", "Dockerfile")
+    output_dir = project_path(
+        config, build.get("output_dir", "dist"), "[build].output_dir"
+    )
+    context = project_path(
+        config,
+        build.get("context", "."),
+        "[build].context",
+        allow_root=True,
+        kind="directory",
+    )
+    dockerfile = project_path(
+        config,
+        build.get("dockerfile", "Dockerfile"),
+        "[build].dockerfile",
+        kind="file",
+    )
     platforms = build.get("platforms", ["linux/amd64"])
     version = project_version(config)
 

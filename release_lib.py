@@ -2,13 +2,20 @@
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
-import tomllib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+
+import tomllib
+
+SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
+SUPPORTED_DEB_ARCHITECTURES = ("amd64", "arm64")
+SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.-]*$")
+SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._~]*$")
 
 
 @dataclass(frozen=True)
@@ -31,14 +38,17 @@ class ProjectConfig:
 
 
 def load_config(path=None):
-    """Load and minimally validate a project's release.toml."""
+    """Load and validate the common structure of a project's manifest."""
     config_path = Path(path or "release.toml").resolve()
     if not config_path.is_file():
         print(f"Error: {config_path} not found", file=sys.stderr)
         sys.exit(1)
 
-    with config_path.open("rb") as file:
-        data = tomllib.load(file)
+    try:
+        with config_path.open("rb") as file:
+            data = tomllib.load(file)
+    except tomllib.TOMLDecodeError as error:
+        _config_error(str(error))
 
     project = data.get("project")
     if not isinstance(project, dict):
@@ -51,16 +61,273 @@ def load_config(path=None):
         print(f"Error: [project] is missing: {names}", file=sys.stderr)
         sys.exit(1)
 
+    for name in ("build", "package", "deb", "rpm", "hosting", "aur"):
+        section = data.get(name, {})
+        if not isinstance(section, dict):
+            _config_error(f"[{name}] must be a table")
+
+    _require_string(project, "id", "[project]")
+    _require_string(project, "version_file", "[project]")
+    if not SAFE_IDENTIFIER.fullmatch(project["id"]):
+        _config_error("[project].id contains unsupported characters")
+
     return ProjectConfig(data=data, path=config_path)
+
+
+def _config_error(message):
+    print(f"Error: invalid release.toml: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def _require_string(section, key, section_name):
+    value = section.get(key)
+    if not isinstance(value, str) or not value.strip():
+        _config_error(f"{section_name}.{key} must be a non-empty string")
+    return value
+
+
+def project_path(config, value, label, *, allow_root=False, kind=None):
+    """Resolve a manifest path while keeping it inside the project root."""
+    if not isinstance(value, str) or not value.strip():
+        _config_error(f"{label} must be a non-empty relative path")
+    raw = Path(value)
+    if raw.is_absolute():
+        _config_error(f"{label} must be relative to the project root")
+
+    root = config.root.resolve()
+    resolved = (root / raw).resolve()
+    if not resolved.is_relative_to(root) or (resolved == root and not allow_root):
+        _config_error(f"{label} must stay inside the project root")
+    if kind == "file" and not resolved.is_file():
+        _config_error(f"{label} does not point to a file: {resolved}")
+    if kind == "directory" and not resolved.is_dir():
+        _config_error(f"{label} does not point to a directory: {resolved}")
+    return resolved
+
+
+def validate_config(config, operation):
+    """Validate fields required by a build or publisher operation."""
+    project = config.project
+    build = config.section("build")
+
+    version_file = project_path(
+        config, project["version_file"], "[project].version_file", kind="file"
+    )
+    if operation == "build":
+        for key in ("description", "maintainer", "license"):
+            _require_string(project, key, "[project]")
+        for name in ("deb", "rpm"):
+            if name not in config.data:
+                _config_error(f"missing [{name}] section required by package.py")
+
+        platforms = _validate_platforms(build)
+        _validate_package_name(config.section("deb"), project["id"], "[deb]")
+        _validate_package_name(config.section("rpm"), project["id"], "[rpm]")
+        deb_architectures = _validate_deb_architectures(config.section("deb"))
+        expected_architectures = [
+            platform.removeprefix("linux/") for platform in platforms
+        ]
+        if deb_architectures != expected_architectures:
+            _config_error(
+                "[deb].architectures must match [build].platforms in the same order"
+            )
+
+        args = build.get("args", {})
+        if not isinstance(args, dict) or any(
+            not isinstance(key, str) or not isinstance(value, (str, int, float, bool))
+            for key, value in args.items()
+        ):
+            _config_error("[build].args must contain scalar values")
+
+        project_path(
+            config,
+            build.get("context", "."),
+            "[build].context",
+            allow_root=True,
+            kind="directory",
+        )
+        project_path(
+            config,
+            build.get("dockerfile", "Dockerfile"),
+            "[build].dockerfile",
+            kind="file",
+        )
+        project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
+        _validate_assets(config)
+        _validate_string_list(config.section("deb"), "depends", "[deb]")
+        _validate_string_list(config.section("rpm"), "requires", "[rpm]")
+        _validate_hosting(config)
+
+    elif operation == "apt":
+        _validate_package_name(config.section("deb"), project["id"], "[deb]")
+        _validate_deb_architectures(config.section("deb"))
+        project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
+        _validate_hosting(config)
+    elif operation == "rpm":
+        _validate_package_name(config.section("rpm"), project["id"], "[rpm]")
+        _validate_platforms(build)
+        release = config.section("rpm").get("release", "1")
+        if not SAFE_VERSION.fullmatch(str(release)):
+            _config_error("[rpm].release contains unsupported characters")
+        project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
+        _validate_hosting(config)
+    elif operation == "aur":
+        _validate_package_name(
+            config.section("aur"), project["id"], "[aur]", optional=True
+        )
+        project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
+        if config.section("aur").get("git_pkgbuild"):
+            project_path(
+                config,
+                config.section("aur")["git_pkgbuild"],
+                "[aur].git_pkgbuild",
+                kind="file",
+            )
+        _validate_string_list(config.section("aur"), "depends", "[aur]")
+        _validate_hosting(config)
+    else:
+        raise ValueError(f"Unknown validation operation: {operation}")
+
+    return version_file
+
+
+def _validate_package_name(section, default, label, optional=False):
+    keys = (
+        ("package_name", "git_package", "binary_package")
+        if label == "[aur]"
+        else ("package_name",)
+    )
+    for key in keys:
+        value = section.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not SAFE_IDENTIFIER.fullmatch(value):
+            _config_error(f"{label}.{key} contains unsupported characters")
+    if not optional and not SAFE_IDENTIFIER.fullmatch(
+        section.get("package_name", default)
+    ):
+        _config_error(f"{label}.package_name contains unsupported characters")
+
+
+def _validate_deb_architectures(section):
+    architectures = section.get("architectures", ["amd64"])
+    if (
+        not isinstance(architectures, list)
+        or not architectures
+        or any(arch not in SUPPORTED_DEB_ARCHITECTURES for arch in architectures)
+        or len(architectures) != len(set(architectures))
+    ):
+        allowed = ", ".join(SUPPORTED_DEB_ARCHITECTURES)
+        _config_error(f"[deb].architectures must contain unique values from: {allowed}")
+    return architectures
+
+
+def _validate_platforms(build):
+    platforms = build.get("platforms", ["linux/amd64"])
+    if (
+        not isinstance(platforms, list)
+        or not platforms
+        or any(platform not in SUPPORTED_PLATFORMS for platform in platforms)
+        or len(platforms) != len(set(platforms))
+    ):
+        allowed = ", ".join(SUPPORTED_PLATFORMS)
+        _config_error(f"[build].platforms must contain unique values from: {allowed}")
+    return platforms
+
+
+def _validate_assets(config):
+    package = config.section("package")
+    binary = package.get("binary", config.project["id"])
+    project_path(config, binary, "[package].binary")
+    for kind in ("deb", "rpm", "archive"):
+        subsection = package.get(kind, {})
+        if not isinstance(subsection, dict):
+            _config_error(f"[package.{kind}] must be a table")
+        assets = subsection.get("assets", [])
+        if not isinstance(assets, list):
+            _config_error(f"[package.{kind}].assets must be an array of tables")
+        for index, asset in enumerate(assets):
+            label = f"[package.{kind}].assets[{index}]"
+            if not isinstance(asset, dict):
+                _config_error(f"{label} must be a table")
+            source = _require_string(asset, "source", label)
+            destination = _require_string(asset, "dest", label)
+            project_path(config, source, f"{label}.source")
+            dest_path = Path(destination)
+            if not dest_path.is_absolute() or ".." in dest_path.parts:
+                _config_error(f"{label}.dest must be an absolute package path")
+            mode = asset.get("mode", 0o644)
+            if not isinstance(mode, int) or mode < 0 or mode > 0o7777:
+                _config_error(f"{label}.mode must be a valid integer file mode")
+
+    appimage = package.get("appimage", {})
+    if not isinstance(appimage, dict):
+        _config_error("[package.appimage] must be a table")
+    for key in ("icon", "desktop"):
+        if key in appimage:
+            project_path(
+                config, appimage[key], f"[package.appimage].{key}", kind="file"
+            )
+
+
+def _validate_string_list(section, key, label):
+    values = section.get(key, [])
+    if not isinstance(values, list) or any(
+        not isinstance(value, str) or not value.strip() for value in values
+    ):
+        _config_error(f"{label}.{key} must be an array of non-empty strings")
+
+
+def _validate_hosting(config):
+    hosting = config.section("hosting")
+    for name in ("apt", "aur", "signing"):
+        section = hosting.get(name, {})
+        if not isinstance(section, dict):
+            _config_error(f"[hosting.{name}] must be a table")
+    for key, default in (
+        ("release_prefix", "releases"),
+        ("apt_prefix", "apt"),
+        ("rpm_prefix", "rpm"),
+    ):
+        value = hosting.get(key, default)
+        path = Path(value) if isinstance(value, str) else Path("..")
+        if (
+            not isinstance(value, str)
+            or not value.strip("/")
+            or value.startswith("/")
+            or ".." in path.parts
+        ):
+            _config_error(f"[hosting].{key} must be a safe object prefix")
+
+    apt = hosting.get("apt", {})
+    for key in ("suite", "component", "origin", "label"):
+        if key in apt:
+            _require_string(apt, key, "[hosting.apt]")
+
+    aur = hosting.get("aur", {})
+    for key in ("host", "ssh_user", "maintainer"):
+        if key in aur:
+            _require_string(aur, key, "[hosting.aur]")
+    host = aur.get("host", "aur.archlinux.org")
+    user = aur.get("ssh_user", "aur")
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", host) or not re.fullmatch(
+        r"[A-Za-z0-9_-]+", user
+    ):
+        _config_error("[hosting.aur] host or ssh_user contains unsupported characters")
 
 
 def project_version(config):
     """Read the project version using the configured version file."""
-    version_path = config.root / config.project["version_file"]
-    if not version_path.is_file():
-        print(f"Error: version file {version_path} not found", file=sys.stderr)
-        sys.exit(1)
-    return version_path.read_text().strip()
+    version_path = project_path(
+        config,
+        config.project["version_file"],
+        "[project].version_file",
+        kind="file",
+    )
+    version = version_path.read_text().strip()
+    if not SAFE_VERSION.fullmatch(version):
+        _config_error("project version contains unsupported characters")
+    return version
 
 
 def compute_hashes(path):

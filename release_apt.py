@@ -36,14 +36,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from release_lib import (
+    acquire_r2_lock,
     check_tools,
     compute_hashes,
-    acquire_r2_lock,
     download_optional,
     load_config,
     load_env_file,
+    project_path,
     project_version,
     upload_tree,
+    validate_config,
 )
 
 
@@ -322,7 +324,7 @@ def main():
     component = apt_hosting.get("component", "main")
     archs = tuple(apt.get("architectures", ("amd64",)))
     package_name = apt.get("package_name", project["id"])
-    dist = config.root / build.get("output_dir", "dist")
+    dist = project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
     version = project_version(config)
 
     check_tools("dpkg-deb", "dpkg", "gpg")
