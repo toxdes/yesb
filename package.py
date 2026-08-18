@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(os.environ.get("PACKAGE_ROOT", "/build"))
 OUT = Path(os.environ.get("OUTPUT_DIR", "/output"))
 ARCH = os.environ.get("TARGETARCH", "amd64")
-INCLUDE_APPIMAGE = os.environ.get("INCLUDE_APPIMAGE", "")
+INCLUDE_APPIMAGE = os.environ.get("INCLUDE_APPIMAGE", "") == "1"
 
 with (ROOT / "release.toml").open("rb") as file:
     CONFIG = tomllib.load(file)
@@ -153,8 +153,10 @@ def build_appimage():
     appimage = PACKAGE.get("appimage", {})
     runtime = Path("/usr/local/share/appimage-runtime")
     if not runtime.exists():
-        print("  (skip AppImage: runtime not found)")
-        return
+        raise SystemExit(
+            "INCLUDE_APPIMAGE was requested but "
+            "/usr/local/share/appimage-runtime is missing"
+        )
 
     appdir = Path("/tmp/appdir")
     (appdir / "usr/bin").mkdir(parents=True, exist_ok=True)
