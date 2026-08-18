@@ -260,14 +260,24 @@ def acquire_r2_lock(key, *, max_age=1800):
     raise RuntimeError(f"Could not acquire R2 publish lock: {key}")
 
 
-def upload_tree(root_dir):
-    """Upload every file below root_dir using paths relative to root_dir."""
+def upload_tree(root_dir, *, order=None, extra_args=None):
+    """Upload every file below root_dir, optionally using a publication order."""
     client, bucket = r2_client()
-    for path in sorted(root_dir.rglob("*")):
-        if path.is_file():
-            key = str(path.relative_to(root_dir))
+    root_dir = Path(root_dir)
+    paths = [path for path in root_dir.rglob("*") if path.is_file()]
+    if order:
+        paths.sort(key=lambda path: (order(path.relative_to(root_dir)), str(path)))
+    else:
+        paths.sort()
+    for path in paths:
+        relative = path.relative_to(root_dir)
+        key = str(relative)
+        options = extra_args(relative) if extra_args else None
+        if options:
+            client.upload_file(str(path), bucket, key, ExtraArgs=options)
+        else:
             client.upload_file(str(path), bucket, key)
-            print(f"  {key}")
+        print(f"  {key}")
 
 
 def run(command, **kwargs):

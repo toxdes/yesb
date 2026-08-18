@@ -111,8 +111,42 @@ def find_debs(dist, package_name):
     return debs
 
 
-def build_repo(root_dir, debs, *, prefix, component, suite, archs, package_name,
-               origin, label, existing_packages=None):
+def apt_upload_order(relative):
+    """Publish payloads first and client entry-point metadata last."""
+    name = relative.name
+    parts = relative.parts
+    if "pool" in parts or name == "pubkey.gpg":
+        return 0
+    if name in {"Packages", "Packages.gz"}:
+        return 1
+    if name == "Release":
+        return 2
+    if name == "Release.gpg":
+        return 3
+    if name == "InRelease":
+        return 4
+    return 1
+
+
+def apt_upload_headers(relative):
+    if "pool" in relative.parts:
+        return {"CacheControl": "public, max-age=31536000, immutable"}
+    return {"CacheControl": "no-cache"}
+
+
+def build_repo(
+    root_dir,
+    debs,
+    *,
+    prefix,
+    component,
+    suite,
+    archs,
+    package_name,
+    origin,
+    label,
+    existing_packages=None,
+):
     prefix_dir = root_dir / prefix
     pool_dir = prefix_dir / "pool" / component / package_name[0] / package_name
     pool_dir.mkdir(parents=True, exist_ok=True)
@@ -353,7 +387,7 @@ def main():
         print(f"Repository at: {repo}")
     else:
         print("Uploading to R2 ...")
-        upload_tree(repo_path)
+        upload_tree(repo_path, order=apt_upload_order, extra_args=apt_upload_headers)
         print("Done.")
 
     print(f"\nRepository built for {package_name} {version} ({suite}).")

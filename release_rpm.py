@@ -87,6 +87,23 @@ def sign_rpms(rpms, key_id):
         subprocess.run(cmd + [str(rpm)], check=True)
 
 
+def rpm_upload_order(relative):
+    """Publish RPM payloads before the repository entry-point metadata."""
+    if relative.suffix == ".rpm" or relative.name == "pubkey.gpg":
+        return 0
+    if relative.name == "repomd.xml.asc":
+        return 2
+    if relative.name == "repomd.xml":
+        return 3
+    return 1
+
+
+def rpm_upload_headers(relative):
+    if relative.suffix == ".rpm":
+        return {"CacheControl": "public, max-age=31536000, immutable"}
+    return {"CacheControl": "no-cache"}
+
+
 def gpg_sign_repomd(repomd_path, key_id, passphrase=None):
     cmd = ["gpg", "--batch", "--yes"]
     sp_args = {}
@@ -213,7 +230,7 @@ def main():
         print(f"Repository at: {repo}")
     else:
         print("Uploading to R2 ...")
-        upload_tree(repo_path)
+        upload_tree(repo_path, order=rpm_upload_order, extra_args=rpm_upload_headers)
         print("Done.")
 
     print(f"\nRepository built for {package_name} {version}.")
