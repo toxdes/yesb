@@ -137,6 +137,7 @@ def r2_client():
         endpoint_url=os.environ["AWS_ENDPOINT_URL"],
         aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        region_name=os.environ.get("R2_REGION", "auto"),
     )
     return client, os.environ["AWS_BUCKET"]
 
