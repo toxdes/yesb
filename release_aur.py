@@ -19,15 +19,23 @@ Environment:
 """
 
 import argparse
-import hashlib
-import os
 import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from release_lib import load_config, load_env_file, project_version, upload_file
+from release_lib import (
+    check_tools,
+    compute_hashes,
+    load_config,
+    load_env_file,
+    project_path,
+    project_version,
+    run,
+    upload_file,
+    validate_config,
+)
 
 # Arch CARCH -> our filename arch suffix
 _ARCH_MAP = {"x86_64": "amd64", "aarch64": "arm64"}
@@ -55,82 +63,18 @@ package() {{
 """
 
 
-def run(cmd, **kwargs):
-    subprocess.run(cmd, shell=True, check=True, **kwargs)
-
-
-def parse_bash_array(val):
-    val = val.strip()
-    if not val.startswith("(") or not val.endswith(")"):
-        return None
-    inner = val[1:-1]
-    parts = []
-    current = ""
-    in_quote = False
-    for ch in inner:
-        if ch == "'" or ch == '"':
-            in_quote = not in_quote
-        elif ch.isspace() and not in_quote:
-            if current:
-                parts.append(current)
-                current = ""
-        else:
-            current += ch
-    if current:
-        parts.append(current)
-    return parts or None
-
-
-def strip_quotes(val):
-    val = val.strip()
-    if (val.startswith('"') and val.endswith('"')) or \
-       (val.startswith("'") and val.endswith("'")):
-        return val[1:-1]
-    return val
-
-
-def generate_srcinfo(pkgbuild_text):
-    pkgbase = None
-    pkgname = None
-    lines_out = []
-    in_func = 0
-
-    for line in pkgbuild_text.splitlines():
-        stripped = line.strip()
-
-        if stripped.startswith("#"):
-            continue
-        if not stripped:
-            continue
-
-        if "()" in stripped and "{" in stripped:
-            in_func = 1
-            continue
-        if in_func > 0:
-            in_func += stripped.count("{") - stripped.count("}")
-            continue
-
-        if "=" in stripped:
-            key, val = stripped.split("=", 1)
-            key = key.strip()
-            val = val.strip()
-
-            if key == "pkgname":
-                pkgname = val
-                if pkgbase is None:
-                    pkgbase = val
-                continue
-
-            arr = parse_bash_array(val)
-            if arr:
-                for item in arr:
-                    lines_out.append(f"\t{key} = {strip_quotes(item)}")
-            else:
-                lines_out.append(f"\t{key} = {strip_quotes(val)}")
-
-    header = f"pkgbase = {pkgbase or 'promptr-git'}\n"
-    lines_out.append(f"\npkgname = {pkgname or 'promptr-git'}")
-    return header + "\n".join(lines_out) + "\n"
+def generate_srcinfo(repo):
+    """Generate authoritative AUR metadata using makepkg."""
+    result = subprocess.run(
+        ["makepkg", "--printsrcinfo"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    if not result.stdout.strip():
+        raise RuntimeError("makepkg produced an empty .SRCINFO")
+    return result.stdout.rstrip("\n") + "\n"
 
 
 def clone_or_pull(repo_name, workdir, aur_host, aur_user):
