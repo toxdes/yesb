@@ -53,6 +53,41 @@ def git_revision(context):
     return revision if result.returncode == 0 and revision else "unknown"
 
 
+def check_builder_platforms(platforms):
+    """Fail early when the active Buildx builder lacks a requested platform."""
+    result = subprocess.run(
+        ["docker", "buildx", "inspect", "--bootstrap"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    platform_line = next(
+        (
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip().startswith("Platforms:")
+        ),
+        "",
+    )
+    available = {
+        value.strip().rstrip("*")
+        for value in platform_line.removeprefix("Platforms:").split(",")
+        if value.strip()
+    }
+    missing = [
+        platform
+        for platform in platforms
+        if platform not in available
+        and not any(value.startswith(platform + "/") for value in available)
+    ]
+    if missing:
+        names = ", ".join(missing)
+        raise RuntimeError(
+            f"Buildx builder does not support: {names}. "
+            "Configure binfmt/QEMU explicitly, then inspect the builder again."
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -94,21 +129,15 @@ def main():
     output_dir.mkdir(parents=True)
 
     try:
-        run(["docker", "version", "--format", "{{.Server.Version}}"],
-            capture_output=True)
-    except subprocess.CalledProcessError:
-        print("Error: Docker is not available", file=sys.stderr)
+        run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+        )
+        run(["docker", "buildx", "version"], capture_output=True)
+        check_builder_platforms(platforms)
+    except (subprocess.CalledProcessError, RuntimeError) as error:
+        print(f"Error: Docker Buildx is not ready: {error}", file=sys.stderr)
         return 1
-
-    subprocess.run(
-        [
-            "docker", "run", "--rm", "--privileged",
-            "multiarch/qemu-user-static", "--reset", "-p", "yes",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
 
     build_args = dict(build.get("args", {}))
     build_args.setdefault("VERSION", version)
