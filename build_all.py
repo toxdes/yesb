@@ -42,6 +42,17 @@ def write_checksums(output_dir):
         (output_dir / "SHA256SUMS").write_text("\n".join(sums) + "\n")
 
 
+def git_revision(context):
+    result = subprocess.run(
+        ["git", "-C", str(context), "rev-parse", "--short=8", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    revision = result.stdout.strip()
+    return revision if result.returncode == 0 and revision else "unknown"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -87,6 +98,7 @@ def main():
 
     build_args = dict(build.get("args", {}))
     build_args.setdefault("VERSION", version)
+    build_args.setdefault("GIT_SHA", git_revision(context))
     if args.include_appimage:
         build_args["INCLUDE_APPIMAGE"] = "1"
 
