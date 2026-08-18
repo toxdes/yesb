@@ -95,20 +95,24 @@ def load_existing_packages(prefix, suite, component, archs, destination):
                 indexes[arch] = file.read()
     return indexes
 
+
 def parse_control(deb_path):
     result = subprocess.run(
         ["dpkg-deb", "-f", str(deb_path)],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     parser = email.parser.HeaderParser()
     msg = parser.parsestr(result.stdout)
     return dict(msg)
 
 
-def find_debs(dist, package_name):
-    debs = sorted(dist.glob(f"{package_name}_*.deb"))
-    if not debs:
-        print(f"No {package_name} .deb files found in {dist}/", file=sys.stderr)
+def find_debs(dist, package_name, version, archs):
+    debs = [dist / f"{package_name}_{version}_{arch}.deb" for arch in archs]
+    missing = [path.name for path in debs if not path.is_file()]
+    if missing:
+        print("Missing required .deb file(s): " + ", ".join(missing), file=sys.stderr)
         sys.exit(1)
     return debs
 
@@ -314,6 +318,7 @@ def main():
         load_env_file(args.env)
 
     config = load_config(Path(args.project_root) / "release.toml")
+    validate_config(config, "apt")
     project = config.project
     build = config.section("build")
     apt = config.section("deb")
@@ -329,7 +334,7 @@ def main():
 
     check_tools("dpkg-deb", "dpkg", "gpg")
 
-    debs = find_debs(dist, package_name)
+    debs = find_debs(dist, package_name, version, archs)
     print(f"Found {len(debs)} package(s):")
     for d in debs:
         print(f"  {d.name}")

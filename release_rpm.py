@@ -38,14 +38,22 @@ from release_lib import (
     download_prefix,
     load_config,
     load_env_file,
+    project_path,
     project_version,
     upload_tree,
+    validate_config,
 )
 
-def find_rpms(dist, package_name):
-    rpms = sorted(dist.glob(f"{package_name}-*.rpm"))
-    if not rpms:
-        print(f"No {package_name} .rpm files found in {dist}/", file=sys.stderr)
+
+def find_rpms(dist, package_name, version, release, platforms):
+    arch_map = {"linux/amd64": "x86_64", "linux/arm64": "aarch64"}
+    rpms = [
+        dist / f"{package_name}-{version}-{release}.{arch_map[platform]}.rpm"
+        for platform in platforms
+    ]
+    missing = [path.name for path in rpms if not path.is_file()]
+    if missing:
+        print("Missing required .rpm file(s): " + ", ".join(missing), file=sys.stderr)
         sys.exit(1)
     return rpms
 
@@ -176,14 +184,17 @@ def main():
         load_env_file(args.env)
 
     config = load_config(Path(args.project_root) / "release.toml")
+    validate_config(config, "rpm")
     project = config.project
     build = config.section("build")
     rpm = config.section("rpm")
     hosting = config.section("hosting")
     prefix = hosting.get("rpm_prefix", "rpm")
     package_name = rpm.get("package_name", project["id"])
-    dist = config.root / build.get("output_dir", "dist")
+    dist = project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
     version = project_version(config)
+    release = str(rpm.get("release", "1"))
+    platforms = build.get("platforms", ["linux/amd64"])
 
     check_tools("createrepo_c", "gpg", "rpmsign")
 
@@ -191,7 +202,7 @@ def main():
     if gpg_key and os.environ.get("GPG_PASSPHRASE"):
         pre_cache_gpg_key(gpg_key, os.environ["GPG_PASSPHRASE"])
 
-    rpms = find_rpms(dist, package_name)
+    rpms = find_rpms(dist, package_name, version, release, platforms)
     print(f"Found {len(rpms)} package(s):")
     for r in rpms:
         print(f"  {r.name}")

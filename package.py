@@ -165,9 +165,18 @@ install -m755 /build/{BINARY} %{{buildroot}}/usr/bin/{BINARY}
 """
     spec_path = topdir / "SPECS" / f"{package_name}.spec"
     spec_path.write_text(spec)
-    subprocess.run([
-        "rpmbuild", "-bb", "--define", f"_topdir {topdir}", str(spec_path)
-    ], check=True)
+    subprocess.run(
+        [
+            "rpmbuild",
+            "-bb",
+            "--define",
+            f"_topdir {topdir}",
+            "--define",
+            "dist %{nil}",
+            str(spec_path),
+        ],
+        check=True,
+    )
 
     source = topdir / "RPMS" / RPM_ARCH / f"{name}.rpm"
     destination = OUT / f"{name}.rpm"

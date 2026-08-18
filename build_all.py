@@ -22,8 +22,16 @@ def flatten_output(output_dir):
         if not child.is_dir() or child.name == ".git":
             continue
         for artifact in child.iterdir():
-            if artifact.is_file():
-                shutil.move(str(artifact), str(output_dir / artifact.name))
+            if not artifact.is_file():
+                raise RuntimeError(
+                    f"Unexpected nested build output: {artifact.relative_to(output_dir)}"
+                )
+            destination = output_dir / artifact.name
+            if destination.exists():
+                raise RuntimeError(
+                    f"Build platforms produced the same artifact name: {artifact.name}"
+                )
+            shutil.move(str(artifact), str(destination))
         child.rmdir()
 
 
@@ -87,6 +95,33 @@ def check_builder_platforms(platforms):
             f"Buildx builder does not support: {names}. "
             "Configure binfmt/QEMU explicitly, then inspect the builder again."
         )
+
+
+def validate_artifacts(output_dir, config, platforms, version, include_appimage):
+    """Require a complete artifact set for every requested architecture."""
+    deb_name = config.section("deb").get("package_name", config.project["id"])
+    rpm_name = config.section("rpm").get("package_name", config.project["id"])
+    rpm_release = config.section("rpm").get("release", "1")
+    arch_map = {
+        "linux/amd64": ("amd64", "x86_64"),
+        "linux/arm64": ("arm64", "aarch64"),
+    }
+    expected = []
+    for platform in platforms:
+        deb_arch, rpm_arch = arch_map[platform]
+        expected.extend(
+            [
+                f"{deb_name}_{version}_{deb_arch}.deb",
+                f"{rpm_name}-{version}-{rpm_release}.{rpm_arch}.rpm",
+                f"{config.project['id']}_{version}_{deb_arch}.tar.gz",
+            ]
+        )
+        if include_appimage:
+            expected.append(f"{config.project['id']}-{version}-{deb_arch}.AppImage")
+
+    missing = [name for name in expected if not (output_dir / name).is_file()]
+    if missing:
+        raise RuntimeError("Build did not produce: " + ", ".join(missing))
 
 
 def replace_output(source, destination):
@@ -168,6 +203,7 @@ def main():
     build_args.setdefault("GIT_SHA", git_revision(context))
     if args.include_appimage:
         build_args["INCLUDE_APPIMAGE"] = "1"
+    include_appimage = str(build_args.get("INCLUDE_APPIMAGE", "")) == "1"
     command = [
         "docker",
         "buildx",
@@ -192,6 +228,9 @@ def main():
         print(f"\nBuilding {config.project['id']} for {', '.join(platforms)} ...\n")
         run(command)
         flatten_output(temporary_output)
+        validate_artifacts(
+            temporary_output, config, platforms, version, include_appimage
+        )
         git_pkgbuild = config.section("aur").get("git_pkgbuild")
         if git_pkgbuild:
             source = project_path(
