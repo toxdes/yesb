@@ -164,6 +164,28 @@ def download_optional(key, path):
     return True
 
 
+def download_prefix(prefix, destination, *, suffix=None):
+    """Download matching objects below a prefix, preserving relative paths."""
+    client, bucket = r2_client()
+    normalized = prefix.strip("/") + "/"
+    destination = Path(destination)
+    downloaded = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=normalized):
+        for item in page.get("Contents", []):
+            key = item["Key"]
+            if key.endswith("/") or (suffix and not key.endswith(suffix)):
+                continue
+            relative = Path(key.removeprefix(normalized))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RuntimeError(f"Unsafe object key below {prefix}: {key}")
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            client.download_file(bucket, key, str(target))
+            downloaded.append(target)
+    return downloaded
+
+
 def acquire_r2_lock(key, *, max_age=1800):
     """Acquire an expiring single-writer lock in R2.
 
@@ -205,12 +227,35 @@ def acquire_r2_lock(key, *, max_age=1800):
             age = time.time() - head["LastModified"].timestamp()
             if age <= max_age:
                 raise RuntimeError(
-                    f"R2 publish lock is held: {key} "
-                    f"({int(max_age - age)}s remaining)"
+                    f"R2 publish lock is held: {key} ({int(max_age - age)}s remaining)"
                 ) from error
 
-            print(f"Removing stale R2 publish lock: {key}")
-            client.delete_object(Bucket=bucket, Key=key)
+            print(f"Taking over stale R2 publish lock: {key}")
+            try:
+                client.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=token.encode(),
+                    IfMatch=head["ETag"],
+                    ContentType="text/plain",
+                )
+            except Exception as takeover_error:
+                response = getattr(takeover_error, "response", {})
+                code = response.get("Error", {}).get("Code")
+                if code in {"PreconditionFailed", "412"}:
+                    continue
+                raise
+
+            print(f"Acquired R2 publish lock: {key}")
+
+            def release():
+                current = client.get_object(Bucket=bucket, Key=key)
+                owner = current["Body"].read().decode()
+                if owner == token:
+                    client.delete_object(Bucket=bucket, Key=key)
+                    print(f"Released R2 publish lock: {key}")
+
+            return release
 
     raise RuntimeError(f"Could not acquire R2 publish lock: {key}")
 

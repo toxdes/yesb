@@ -33,7 +33,9 @@ import tempfile
 from pathlib import Path
 
 from release_lib import (
+    acquire_r2_lock,
     check_tools,
+    download_prefix,
     load_config,
     load_env_file,
     project_version,
@@ -52,12 +54,15 @@ def build_repo(root_dir, rpms, prefix):
     rpm_dir = root_dir / prefix
     rpm_dir.mkdir(parents=True, exist_ok=True)
 
+    current_rpms = []
     for rpm in rpms:
-        shutil.copy2(rpm, rpm_dir / rpm.name)
+        destination = rpm_dir / rpm.name
+        shutil.copy2(rpm, destination)
+        current_rpms.append(destination)
 
     gpg_key = os.environ.get("GPG_KEY_ID")
     if gpg_key:
-        sign_rpms(rpm_dir, gpg_key)
+        sign_rpms(current_rpms, gpg_key)
 
     subprocess.run(
         ["createrepo_c", str(rpm_dir)],
@@ -76,9 +81,9 @@ def pre_cache_gpg_key(key_id, passphrase=None):
     subprocess.run(cmd, check=True, **sp_args)
 
 
-def sign_rpms(rpm_dir, key_id):
+def sign_rpms(rpms, key_id):
     cmd = ["rpmsign", "--addsign", "--define", f"_gpg_name {key_id}"]
-    for rpm in sorted(rpm_dir.glob("*.rpm")):
+    for rpm in sorted(rpms):
         subprocess.run(cmd + [str(rpm)], check=True)
 
 
@@ -179,6 +184,13 @@ def main():
     keep = args.dry_run
     if not keep:
         atexit.register(shutil.rmtree, repo, ignore_errors=True)
+    if not args.dry_run and not args.serve:
+        release_lock = acquire_r2_lock(f"{prefix}/.publish.lock")
+        atexit.register(release_lock)
+        print("Reading existing shared RPM payloads from R2 ...")
+        existing = download_prefix(prefix, repo_path / prefix, suffix=".rpm")
+        print(f"Found {len(existing)} existing RPM(s).")
+
     print(f"\nBuilding RPM repository in {repo} ...")
     build_repo(repo_path, rpms, prefix)
 
