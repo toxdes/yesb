@@ -36,6 +36,9 @@ the Yesb scripts unless the user is changing the toolkit itself.
    runtime and tools. Use `--project-root PATH` when invoked elsewhere.
 7. Verify every configured architecture has the expected `.deb`, `.rpm`, and
    `.tar.gz`, plus matching `.sha256` entries and `SHA256SUMS`.
+   RPM files must use `package-version-release.arch.rpm`; APT architectures
+   and Docker platforms must be declared in matching order. Supported targets
+   are currently `linux/amd64` and `linux/arm64`.
 
 Never invent package dependencies. Derive them from the built executable and
 the project's documented runtime requirements. Keep secrets out of
@@ -50,12 +53,15 @@ stage, then use a Linux packaging stage that:
   `/build`;
 - copies or mounts `yesb/package.py`;
 - provides Python 3.11+, `dpkg-deb`, `rpmbuild`, and `tar`;
-- maps `ARG TARGETARCH`, `ARG VERSION`, and `ARG INCLUDE_APPIMAGE` into the
-  same-named environment variables before running `package.py`;
+  - maps `ARG TARGETARCH`, `ARG VERSION`, `ARG GIT_SHA`, and
+    `ARG INCLUDE_APPIMAGE` into the same-named environment variables before
+    running `package.py`;
 - ends with a scratch stage that copies the contents of `/output` to `/`.
 
-For AppImage output, also provide `ldd`, `glib-compile-schemas`, `mksquashfs`,
-and `/usr/local/share/appimage-runtime`.
+For AppImage output, set `INCLUDE_APPIMAGE=1` (the default is disabled) and
+provide `ldd`, `glib-compile-schemas`, `mksquashfs`, and
+`/usr/local/share/appimage-runtime`. A requested AppImage fails the build when
+the runtime is missing.
 
 ## Validate repositories
 

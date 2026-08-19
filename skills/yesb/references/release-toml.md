@@ -1,6 +1,8 @@
 # `release.toml` reference
 
-Paths are relative to the directory containing `release.toml`.
+Paths are relative to the directory containing `release.toml` and must remain
+inside that project directory. Package asset destinations are absolute paths
+inside the package and must not contain `..`.
 
 ## Project
 
@@ -82,6 +84,11 @@ package_name = "myapp"          # defaults to project.id
 release = "1"                   # default
 requires = ["example-libs"]
 ```
+
+The supported build platforms are `linux/amd64` and `linux/arm64`; use
+`deb.architectures = ["amd64", "arm64"]` in the same order when both are
+requested. RPM artifacts are named
+`package-version-release.x86_64.rpm` or `package-version-release.aarch64.rpm`.
 
 ## Hosting and AUR
 
