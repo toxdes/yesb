@@ -16,6 +16,9 @@ SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
 SUPPORTED_DEB_ARCHITECTURES = ("amd64", "arm64")
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.-]*$")
 SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._~]*$")
+PINNED_IMAGE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*@sha256:[0-9a-f]{64}$"
+)
 
 
 @dataclass(frozen=True)
@@ -184,6 +187,13 @@ def validate_config(config, operation):
                 kind="file",
             )
         _validate_string_list(config.section("aur"), "depends", "[aur]")
+        helper_image = config.section("aur").get("srcinfo_helper_image")
+        if helper_image is not None and (
+            not isinstance(helper_image, str) or not PINNED_IMAGE.fullmatch(helper_image)
+        ):
+            _config_error(
+                "[aur].srcinfo_helper_image must be a Docker image pinned by a sha256 digest"
+            )
         _validate_hosting(config)
     else:
         raise ValueError(f"Unknown validation operation: {operation}")

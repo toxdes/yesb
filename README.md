@@ -43,6 +43,9 @@ architectures = ["amd64", "arm64"]
 [rpm]
 package_name = "myapp"
 
+[aur]
+# srcinfo_helper_image = "ghcr.io/toxdes/yesb-aur-helper@sha256:<64 lowercase hex digits>"
+
 [hosting]
 public_base_url = "https://packages.example.com"
 ```
@@ -72,6 +75,21 @@ To inspect repositories without publishing them:
 Pass `--project-root PATH` when running a script outside the application root.
 The publishing scripts also accept `--env PATH` for `KEY=VALUE` files.
 
+### AUR metadata helper
+
+By default, `release_aur.py` requires a local `makepkg`. Projects publishing
+from Ubuntu, Debian, or another non-Arch host can set
+`[aur].srcinfo_helper_image` to a Docker/OCI image pinned by a full SHA-256
+digest. Yesb then runs only `makepkg --printsrcinfo` in that image; cloning,
+Git commits, AUR pushes, and R2 uploads remain on the host.
+
+The helper runs without network access, with a read-only checkout mount, a
+writable in-container tmpfs, dropped capabilities, and a non-root UID. Do not
+mount SSH keys, agent sockets, cloud credentials, or the Docker socket into
+the helper. `aur-helper.Dockerfile` provides a minimal image recipe; build it
+from a digest-pinned `archlinux:base-devel` image and record the pushed image's
+full digest in each project's `release.toml`.
+
 APT and RPM publication keeps only the latest package version for the project
 being released. Shared packages from other projects remain available, while
 existing immutable package objects are skipped instead of reuploaded. Indexes
@@ -87,7 +105,8 @@ prevents republishing a retired version; bump the version to publish again.
 - `uv` for publisher script dependencies
 - APT publishing: `dpkg`, `dpkg-deb`, and `gpg`
 - RPM publishing: `createrepo_c`, `rpmsign`, and `gpg`
-- AUR publishing: `git`, `ssh`, `makepkg`, and an authenticated AUR account
+- AUR publishing: `git`, `ssh`, and an authenticated AUR account; either local
+  `makepkg` or Docker when `[aur].srcinfo_helper_image` is configured
 - Package container: `dpkg-deb`, `rpmbuild`, and `tar`; AppImage builds also
   need `ldd`, `glib-compile-schemas`, `mksquashfs`, and an AppImage runtime
 

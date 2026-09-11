@@ -19,6 +19,7 @@ Environment:
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -63,15 +64,55 @@ package() {{
 """
 
 
-def generate_srcinfo(repo):
-    """Generate authoritative AUR metadata using makepkg."""
-    result = subprocess.run(
-        ["makepkg", "--printsrcinfo"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+def generate_srcinfo(repo, helper_image=None):
+    """Generate AUR metadata locally or in an isolated helper image."""
+    if helper_image is None:
+        command = ["makepkg", "--printsrcinfo"]
+        result = subprocess.run(
+            command,
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    else:
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--network=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "--tmpfs",
+            f"/work:rw,noexec,nosuid,size=64m,uid={os.getuid()},gid={os.getgid()}",
+            "--mount",
+            f"type=bind,src={repo},dst=/input,readonly",
+            "--workdir",
+            "/work",
+            "--env",
+            "HOME=/tmp",
+            helper_image,
+            "sh",
+            "-c",
+            "cp -- /input/PKGBUILD /work/PKGBUILD && makepkg --printsrcinfo",
+        ]
+        print("  $ " + " ".join(str(part) for part in command))
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode:
+            detail = result.stderr.strip() or "no diagnostic output"
+            raise RuntimeError(
+                f"AUR srcinfo helper failed ({helper_image}): {detail}"
+            )
     if not result.stdout.strip():
         raise RuntimeError("makepkg produced an empty .SRCINFO")
     return result.stdout.rstrip("\n") + "\n"
@@ -88,7 +129,16 @@ def clone_or_pull(repo_name, workdir, aur_host, aur_user):
     return repo_path
 
 
-def push_aur(repo_name, pkgbuild_text, *, aur_host, aur_user, maintainer, version):
+def push_aur(
+    repo_name,
+    pkgbuild_text,
+    *,
+    aur_host,
+    aur_user,
+    maintainer,
+    version,
+    srcinfo_helper_image=None,
+):
     with tempfile.TemporaryDirectory(prefix="aur-") as tmp:
         workdir = Path(tmp)
         repo = clone_or_pull(repo_name, workdir, aur_host, aur_user)
@@ -102,7 +152,7 @@ def push_aur(repo_name, pkgbuild_text, *, aur_host, aur_user, maintainer, versio
 
         pkgbuild_text = pkgbuild_text.rstrip("\n") + "\n"
         (repo / "PKGBUILD").write_text(pkgbuild_text)
-        srcinfo = generate_srcinfo(repo)
+        srcinfo = generate_srcinfo(repo, srcinfo_helper_image)
 
         if (
             old_pkg.rstrip() == pkgbuild_text.rstrip()
@@ -160,7 +210,15 @@ def upload_releases(config, archives):
         upload_file(tarball, key)
 
 
-def release_git(config, version, *, aur_host, aur_user, maintainer):
+def release_git(
+    config,
+    version,
+    *,
+    aur_host,
+    aur_user,
+    maintainer,
+    srcinfo_helper_image=None,
+):
     aur = config.section("aur")
     template = aur.get("git_pkgbuild")
     if not template:
@@ -186,11 +244,21 @@ def release_git(config, version, *, aur_host, aur_user, maintainer):
         aur_user=aur_user,
         maintainer=maintainer,
         version=version,
+        srcinfo_helper_image=srcinfo_helper_image,
     )
     print(f"  -> AUR: {package_name} updated")
 
 
-def release_bin(config, version, archives, *, aur_host, aur_user, maintainer):
+def release_bin(
+    config,
+    version,
+    archives,
+    *,
+    aur_host,
+    aur_user,
+    maintainer,
+    srcinfo_helper_image=None,
+):
     aur = config.section("aur")
     project = config.project
     project_id = project["id"]
@@ -224,6 +292,7 @@ def release_bin(config, version, archives, *, aur_host, aur_user, maintainer):
         aur_user=aur_user,
         maintainer=maintainer,
         version=version,
+        srcinfo_helper_image=srcinfo_helper_image,
     )
     print(f"  -> AUR: {package_name} updated")
 
@@ -249,7 +318,11 @@ def main():
 
     config = load_config(Path(args.project_root) / "release.toml")
     validate_config(config, "aur")
-    check_tools("git", "ssh", "makepkg")
+    aur = config.section("aur")
+    srcinfo_helper_image = aur.get("srcinfo_helper_image")
+    required_tools = ["git", "ssh"]
+    required_tools.append("docker" if srcinfo_helper_image else "makepkg")
+    check_tools(*required_tools)
     version = project_version(config)
     hosting = config.section("hosting")
     aur_hosting = hosting.get("aur", {})
@@ -267,6 +340,7 @@ def main():
             aur_host=aur_host,
             aur_user=aur_user,
             maintainer=maintainer,
+            srcinfo_helper_image=srcinfo_helper_image,
         )
 
     if args.type in ("bin", "both"):
@@ -290,6 +364,7 @@ def main():
             aur_host=aur_host,
             aur_user=aur_user,
             maintainer=maintainer,
+            srcinfo_helper_image=srcinfo_helper_image,
         )
 
 

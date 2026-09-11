@@ -75,8 +75,9 @@ Build package repositories without publishing:
 Use `--serve` instead when the user wants to install-test a temporary local
 repository. APT validation needs `dpkg`, `dpkg-deb`, and `gpg`; RPM validation
 needs `createrepo_c`, `rpmsign`, and `gpg`. The publisher scripts use `uv` to
-resolve their Python dependency. AUR publishing additionally needs `makepkg`,
-`git`, and `ssh`.
+resolve their Python dependency. AUR publishing needs `git` and `ssh`, plus
+either local `makepkg` or Docker when `[aur].srcinfo_helper_image` is
+configured.
 
 APT and RPM repositories keep only the latest package version for the project
 being published. Shared repositories for other projects are preserved while
@@ -109,6 +110,20 @@ enabled by `GPG_KEY_ID`, with optional `GPG_PASSPHRASE`. AUR publishing also
 requires working SSH authentication to the configured AUR host. Production
 APT and RPM uploads refuse unsigned publication unless the user explicitly
 requests `--allow-unsigned`.
+
+For non-Arch hosts, configure `[aur].srcinfo_helper_image` with a full
+SHA-256-pinned helper image. Yesb delegates only `.SRCINFO` generation to that
+isolated image. The AUR checkout is mounted read-only at `/input`; Yesb copies
+`PKGBUILD` into a writable in-container tmpfs before invoking
+`makepkg --printsrcinfo`, because `makepkg` requires a writable build
+directory. Git/SSH and release uploads remain on the host. Do not mount SSH
+keys, agent sockets, cloud credentials, or the Docker socket into the helper.
+
+The helper can be published once to a trusted OCI registry and reused by
+multiple projects. Build it from `aur-helper.Dockerfile` with an explicitly
+digest-pinned `archlinux:base-devel` base, push it, and record the resulting
+image digest in each project's `release.toml`. Run `release_aur.py` as the
+normal release user so the helper receives that user's UID/GID.
 
 Cache operations require `CF_API_TOKEN` and `CF_ZONE_ID`. Setting TTLs also
 requires `CF_BROWSER_TTL` and `CF_EDGE_TTL`.
