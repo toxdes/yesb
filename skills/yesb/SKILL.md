@@ -78,6 +78,18 @@ needs `createrepo_c`, `rpmsign`, and `gpg`. The publisher scripts use `uv` to
 resolve their Python dependency. AUR publishing additionally needs `makepkg`,
 `git`, and `ssh`.
 
+APT and RPM repositories keep only the latest package version for the project
+being published. Shared repositories for other projects are preserved while
+their existing immutable package objects are reused rather than uploaded
+again. Repository indexes and signatures are regenerated and uploaded on
+each release, because they describe the current repository contents.
+
+Publishing a version that already has a package object in R2 is rejected
+before any repository changes are made. A permanent per-project, per-version
+publication marker also prevents republishing a version after its old package
+objects have been retired. To republish, bump the project version; there is
+intentionally no overwrite switch for immutable release artifacts.
+
 ## Publish
 
 Treat publishing and cache purges as external state changes. Confirm that the

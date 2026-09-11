@@ -330,6 +330,36 @@ def project_version(config):
     return version
 
 
+def reject_published_release(existing_keys, release_keys, package_name, version):
+    """Reject a release when any of its immutable package objects already exist."""
+    published = sorted(set(existing_keys).intersection(release_keys))
+    if published:
+        names = ", ".join(published)
+        raise ValueError(
+            f"{package_name} {version} is already published; "
+            f"existing object(s): {names}"
+        )
+
+
+def release_marker_key(prefix, package_name, version):
+    """Return the permanent marker key for a published package version."""
+    return f"{prefix}/.published/{package_name}/{version}.published"
+
+
+def write_release_marker(prefix, package_name, version):
+    """Record a successfully published version in R2."""
+    client, bucket = r2_client()
+    key = release_marker_key(prefix, package_name, version)
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=f"{package_name} {version}\n".encode(),
+        ContentType="text/plain",
+        CacheControl="public, max-age=31536000, immutable",
+    )
+    return key
+
+
 def compute_hashes(path):
     """Return MD5, SHA-1, SHA-256, and byte size for a file."""
     md5 = hashlib.md5()
@@ -453,6 +483,34 @@ def download_prefix(prefix, destination, *, suffix=None):
     return downloaded
 
 
+def list_prefix(prefix, *, suffix=None):
+    """List object keys below an R2 prefix without downloading their bodies."""
+    client, bucket = r2_client()
+    normalized = prefix.strip("/") + "/"
+    keys = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=normalized):
+        for item in page.get("Contents", []):
+            key = item["Key"]
+            if key.endswith("/") or (suffix and not key.endswith(suffix)):
+                continue
+            keys.append(key)
+    return keys
+
+
+def delete_keys(keys):
+    """Delete R2 objects in batches, ignoring an empty key list."""
+    if not keys:
+        return
+    client, bucket = r2_client()
+    for start in range(0, len(keys), 1000):
+        batch = keys[start : start + 1000]
+        client.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+        )
+
+
 def acquire_r2_lock(key, *, max_age=1800):
     """Acquire an expiring single-writer lock in R2.
 
@@ -527,8 +585,8 @@ def acquire_r2_lock(key, *, max_age=1800):
     raise RuntimeError(f"Could not acquire R2 publish lock: {key}")
 
 
-def upload_tree(root_dir, *, order=None, extra_args=None):
-    """Upload every file below root_dir, optionally using a publication order."""
+def upload_tree(root_dir, *, order=None, extra_args=None, skip_existing=None):
+    """Upload a repository tree, optionally skipping immutable existing keys."""
     client, bucket = r2_client()
     root_dir = Path(root_dir)
     paths = [path for path in root_dir.rglob("*") if path.is_file()]
@@ -536,9 +594,13 @@ def upload_tree(root_dir, *, order=None, extra_args=None):
         paths.sort(key=lambda path: (order(path.relative_to(root_dir)), str(path)))
     else:
         paths.sort()
+    skip_existing = set(skip_existing or ())
     for path in paths:
         relative = path.relative_to(root_dir)
         key = str(relative)
+        if key in skip_existing:
+            print(f"  {key} (unchanged)")
+            continue
         options = extra_args(relative) if extra_args else None
         if options:
             client.upload_file(str(path), bucket, key, ExtraArgs=options)

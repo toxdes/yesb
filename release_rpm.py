@@ -35,13 +35,18 @@ from pathlib import Path
 from release_lib import (
     acquire_r2_lock,
     check_tools,
+    delete_keys,
     download_prefix,
     load_config,
     load_env_file,
+    list_prefix,
     project_path,
     project_version,
+    reject_published_release,
+    release_marker_key,
     upload_tree,
     validate_config,
+    write_release_marker,
 )
 
 
@@ -58,9 +63,17 @@ def find_rpms(dist, package_name, version, release, platforms):
     return rpms
 
 
-def build_repo(root_dir, rpms, prefix):
+def build_repo(root_dir, rpms, prefix, package_name):
     rpm_dir = root_dir / prefix
     rpm_dir.mkdir(parents=True, exist_ok=True)
+
+    for path in rpm_dir.iterdir():
+        if (
+            path.is_file()
+            and path.suffix == ".rpm"
+            and path.name.startswith(f"{package_name}-")
+        ):
+            path.unlink()
 
     current_rpms = []
     for rpm in rpms:
@@ -234,15 +247,40 @@ def main():
     keep = args.dry_run
     if not keep:
         atexit.register(shutil.rmtree, repo, ignore_errors=True)
+    existing_package_keys = []
+    existing_marker_keys = []
+    current_package_keys = {f"{prefix}/{rpm.name}" for rpm in rpms}
     if not args.dry_run and not args.serve:
         release_lock = acquire_r2_lock(f"{prefix}/.publish.lock")
         atexit.register(release_lock)
+        existing_package_keys = list_prefix(prefix, suffix=".rpm")
+        marker_prefix = f"{prefix}/.published/{package_name}"
+        existing_marker_keys = list_prefix(marker_prefix, suffix=".published")
+        current_package_keys = {
+            f"{prefix}/{rpm.name}" for rpm in rpms
+        }
+        try:
+            reject_published_release(
+                [
+                    key
+                    for key in existing_package_keys
+                    if key.startswith(f"{prefix}/{package_name}-")
+                ]
+                + existing_marker_keys,
+                current_package_keys
+                | {release_marker_key(prefix, package_name, version)},
+                package_name,
+                version,
+            )
+        except ValueError as error:
+            print(f"Error: {error}", file=sys.stderr)
+            return 1
         print("Reading existing shared RPM payloads from R2 ...")
         existing = download_prefix(prefix, repo_path / prefix, suffix=".rpm")
         print(f"Found {len(existing)} existing RPM(s).")
 
     print(f"\nBuilding RPM repository in {repo} ...")
-    build_repo(repo_path, rpms, prefix)
+    build_repo(repo_path, rpms, prefix, package_name)
 
     if args.serve:
         serve_repo(repo_path, prefix=prefix, package_name=package_name)
@@ -260,7 +298,23 @@ def main():
         print(f"Repository at: {repo}")
     else:
         print("Uploading to R2 ...")
-        upload_tree(repo_path, order=rpm_upload_order, extra_args=rpm_upload_headers)
+        upload_tree(
+            repo_path,
+            order=rpm_upload_order,
+            extra_args=rpm_upload_headers,
+            skip_existing=existing_package_keys,
+        )
+        stale_package_keys = sorted(
+            key
+            for key in existing_package_keys
+            if key.startswith(f"{prefix}/{package_name}-")
+            and key not in current_package_keys
+        )
+        if stale_package_keys:
+            print(f"Removing {len(stale_package_keys)} old {package_name} package(s) ...")
+            delete_keys(stale_package_keys)
+        marker = write_release_marker(prefix, package_name, version)
+        print(f"  {marker}")
         print("Done.")
 
     print(f"\nRepository built for {package_name} {version}.")

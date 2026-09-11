@@ -72,6 +72,13 @@ To inspect repositories without publishing them:
 Pass `--project-root PATH` when running a script outside the application root.
 The publishing scripts also accept `--env PATH` for `KEY=VALUE` files.
 
+APT and RPM publication keeps only the latest package version for the project
+being released. Shared packages from other projects remain available, while
+existing immutable package objects are skipped instead of reuploaded. Indexes
+and signatures are regenerated for every release. Publishing a version whose
+package object already exists is rejected, and a permanent publication marker
+prevents republishing a retired version; bump the version to publish again.
+
 ## Requirements
 
 - Python 3.11 or newer

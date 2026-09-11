@@ -39,13 +39,18 @@ from release_lib import (
     acquire_r2_lock,
     check_tools,
     compute_hashes,
+    delete_keys,
     download_optional,
     load_config,
     load_env_file,
+    list_prefix,
     project_path,
     project_version,
+    reject_published_release,
+    release_marker_key,
     upload_tree,
     validate_config,
+    write_release_marker,
 )
 
 
@@ -70,9 +75,15 @@ def parse_packages(content):
     return stanzas
 
 
-def merge_packages(existing, current):
-    """Merge package indexes, with the current project's version taking precedence."""
+def merge_packages(existing, current, package_name=None):
+    """Merge indexes while keeping only the current version of this project."""
     merged = parse_packages(existing)
+    if package_name:
+        merged = {
+            identity: stanza
+            for identity, stanza in merged.items()
+            if identity[0] != package_name
+        }
     merged.update(parse_packages(current))
     return "\n\n".join(merged[key] for key in sorted(merged)) + ("\n" if merged else "")
 
@@ -182,7 +193,7 @@ def build_repo(
 
         content = "\n\n".join(entries) + "\n"
         if existing_packages and arch in existing_packages:
-            content = merge_packages(existing_packages[arch], content)
+            content = merge_packages(existing_packages[arch], content, package_name)
         (bins_dir / "Packages").write_text(content)
         with gzip.open(bins_dir / "Packages.gz", "wt") as fp:
             fp.write(content)
@@ -376,9 +387,30 @@ def main():
         atexit.register(shutil.rmtree, repo, ignore_errors=True)
     existing = {}
     existing_dir = None
+    existing_package_keys = []
+    existing_marker_keys = []
+    current_package_keys = {
+        f"{prefix}/pool/{component}/{package_name[0]}/{package_name}/{deb.name}"
+        for deb in debs
+    }
     if not args.dry_run and not args.serve:
         release_lock = acquire_r2_lock(f"{prefix}/.publish.lock")
         atexit.register(release_lock)
+        package_prefix = f"{prefix}/pool/{component}/{package_name[0]}/{package_name}"
+        existing_package_keys = list_prefix(package_prefix, suffix=".deb")
+        marker_prefix = f"{prefix}/.published/{package_name}"
+        existing_marker_keys = list_prefix(marker_prefix, suffix=".published")
+        try:
+            reject_published_release(
+                existing_package_keys + existing_marker_keys,
+                current_package_keys
+                | {release_marker_key(prefix, package_name, version)},
+                package_name,
+                version,
+            )
+        except ValueError as error:
+            print(f"Error: {error}", file=sys.stderr)
+            return 1
         print("Reading existing shared package indexes from R2 ...")
         existing_dir = Path(tempfile.mkdtemp(prefix=f"{package_name}-apt-existing-"))
         atexit.register(shutil.rmtree, existing_dir, ignore_errors=True)
@@ -426,6 +458,14 @@ def main():
     else:
         print("Uploading to R2 ...")
         upload_tree(repo_path, order=apt_upload_order, extra_args=apt_upload_headers)
+        stale_package_keys = sorted(
+            set(existing_package_keys) - current_package_keys
+        )
+        if stale_package_keys:
+            print(f"Removing {len(stale_package_keys)} old {package_name} package(s) ...")
+            delete_keys(stale_package_keys)
+        marker = write_release_marker(prefix, package_name, version)
+        print(f"  {marker}")
         print("Done.")
 
     print(f"\nRepository built for {package_name} {version} ({suite}).")
