@@ -96,20 +96,24 @@ def build_deb():
     install_assets(pkg, assets_for("deb"))
 
     depends = ", ".join(package.get("depends", []))
-    control = "\n".join(
+    control_fields = [
+        f"Package: {package.get('package_name', PROJECT_ID)}",
+        f"Version: {VERSION}",
+        f"Architecture: {DEB_ARCH}",
+        f"Maintainer: {PROJECT['maintainer']}",
+        f"Section: {package.get('section', 'utils')}",
+        f"Priority: {package.get('priority', 'optional')}",
+    ]
+    if depends:
+        control_fields.append(f"Depends: {depends}")
+    control_fields.extend(
         [
-            f"Package: {package.get('package_name', PROJECT_ID)}",
-            f"Version: {VERSION}",
-            f"Architecture: {DEB_ARCH}",
-            f"Maintainer: {PROJECT['maintainer']}",
-            f"Section: {package.get('section', 'utils')}",
-            f"Priority: {package.get('priority', 'optional')}",
-            f"Depends: {depends}" if depends else "",
             f"Description: {PROJECT['description']}",
             f" {PROJECT['description']}",
             "",
         ]
     )
+    control = "\n".join(control_fields)
     (pkg / "DEBIAN/control").write_text(control)
     destination = OUT / f"{name}.deb"
     subprocess.run(["dpkg-deb", "--build", str(pkg), str(destination)], check=True)
