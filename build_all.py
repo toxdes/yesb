@@ -13,7 +13,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-from release_lib import load_config, project_path, project_version, run, validate_config
+from release_lib import (
+    load_config,
+    project_path,
+    project_version,
+    release_artifacts,
+    run,
+    validate_config,
+)
 
 
 def flatten_output(output_dir):
@@ -35,12 +42,29 @@ def flatten_output(output_dir):
         child.rmdir()
 
 
-def write_checksums(output_dir):
+def copy_release_artifacts(output_dir, config, version):
+    """Copy externally-built release artifacts into the build output."""
+    for artifact in release_artifacts(config, version):
+        source = artifact.get("source_path")
+        if source is None:
+            continue
+        destination = output_dir / artifact["name"]
+        if destination.exists():
+            raise RuntimeError(
+                f"Build output already contains release artifact: {artifact['name']}"
+            )
+        shutil.copy2(source, destination)
+
+
+def write_checksums(output_dir, extra_names=()):
     suffixes = (".deb", ".rpm", ".AppImage", ".tar.gz")
+    extra_names = set(extra_names)
     sums = []
 
     for artifact in sorted(output_dir.iterdir()):
-        if not artifact.is_file() or not artifact.name.endswith(suffixes):
+        if not artifact.is_file() or (
+            artifact.name not in extra_names and not artifact.name.endswith(suffixes)
+        ):
             continue
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
         line = f"{digest}  {artifact.name}\n"
@@ -118,6 +142,12 @@ def validate_artifacts(output_dir, config, platforms, version, include_appimage)
         )
         if include_appimage:
             expected.append(f"{config.project['id']}-{version}-{deb_arch}.AppImage")
+
+    expected.extend(
+        artifact["name"]
+        for artifact in release_artifacts(config, version)
+        if "source_path" in artifact
+    )
 
     missing = [name for name in expected if not (output_dir / name).is_file()]
     if missing:
@@ -228,6 +258,7 @@ def main():
         print(f"\nBuilding {config.project['id']} for {', '.join(platforms)} ...\n")
         run(command)
         flatten_output(temporary_output)
+        copy_release_artifacts(temporary_output, config, version)
         validate_artifacts(
             temporary_output, config, platforms, version, include_appimage
         )
@@ -238,7 +269,12 @@ def main():
             )
             shutil.copy2(source, temporary_output / source.name)
 
-        write_checksums(temporary_output)
+        write_checksums(
+            temporary_output,
+            extra_names=(
+                artifact["name"] for artifact in release_artifacts(config, version)
+            ),
+        )
         replace_output(temporary_output, output_dir)
     finally:
         if temporary_output.exists():

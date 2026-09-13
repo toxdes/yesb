@@ -1,9 +1,9 @@
 # yesb
 
-Yesb is a small build and release toolkit for Linux applications. It gives
+Yesb is a small build and release toolkit for applications. It gives
 independent projects one repeatable path from a Docker build to Debian, RPM,
-archive, and optional AppImage artifacts, then publishes package repositories
-and AUR packages when needed.
+archive, optional AppImage, and other release artifacts, then publishes package
+repositories, direct downloads, and AUR packages when needed.
 
 The intended setup is to add Yesb as a submodule. The application keeps its
 own `release.toml`, version file, and Dockerfile, so release policy stays with
@@ -43,6 +43,13 @@ architectures = ["amd64", "arm64"]
 [rpm]
 package_name = "myapp"
 
+[release]
+[[release.artifacts]]
+source = "artifacts/myapp-windows.zip"
+name = "myapp-{version}-windows.zip"
+platform = "windows"                    # optional metadata
+architecture = "x86_64"                 # optional metadata
+
 [aur]
 # srcinfo_helper_image = "ghcr.io/toxdes/yesb-aur-helper@sha256:<64 lowercase hex digits>"
 
@@ -63,7 +70,56 @@ Build from the application root:
 
 Artifacts and SHA-256 checksum files are written to `dist/` by default. Add
 `--include-appimage` when the Dockerfile provides the required AppImage tools
-and runtime.
+and runtime. Projects may declare externally-built files in
+`[[release.artifacts]]`; those files are copied into `dist/` after the Docker
+build when a `source` is configured. Source-less artifacts are useful when a
+project's own build step emits files into `dist/`; `build_all.py` leaves those
+independent artifacts alone, while `release_direct.py` requires every declared
+artifact to be present before uploading. Optional `platform` and
+`architecture` fields are descriptive metadata and do not restrict filenames.
+
+To publish declared artifacts as direct downloads:
+
+```sh
+./yesb/release_direct.py --env PATH
+```
+
+The files are uploaded under the configured `release_prefix` without regard to
+their operating system or file type. Existing versioned objects are skipped.
+
+### Homebrew tap
+
+Homebrew support is optional and independent of direct artifact publishing.
+Configure a self-maintained tap and reference macOS CLI archives from the
+generic release artifact list:
+
+```toml
+[homebrew]
+tap = "yourorg/tap"
+remote = "git@github.com:yourorg/homebrew-tap.git"
+branch = "main"
+formula = "myapp"
+binary = "myapp"
+
+[[homebrew.archives]]
+artifact = "myapp-{version}-macos-x86_64.zip"
+architecture = "x86_64"
+url = "https://packages.example.com/releases/myapp-{version}-macos-x86_64.zip"
+
+[[homebrew.archives]]
+artifact = "myapp-{version}-macos-arm64.zip"
+architecture = "arm64"
+url = "https://packages.example.com/releases/myapp-{version}-macos-arm64.zip"
+```
+
+Publish the formula with:
+
+```sh
+./yesb/release_homebrew.py
+```
+
+This updates and pushes the tap repository only; it does not upload artifacts.
+Users can install the formula with `brew install yourorg/tap/myapp`.
 
 To inspect repositories without publishing them:
 
@@ -107,6 +163,7 @@ prevents republishing a retired version; bump the version to publish again.
 - RPM publishing: `createrepo_c`, `rpmsign`, and `gpg`
 - AUR publishing: `git`, `ssh`, and an authenticated AUR account; either local
   `makepkg` or Docker when `[aur].srcinfo_helper_image` is configured
+- Homebrew publishing: `git` and credentials for the configured tap remote
 - Package container: `dpkg-deb`, `rpmbuild`, and `tar`; AppImage builds also
   need `ldd`, `glib-compile-schemas`, `mksquashfs`, and an AppImage runtime
 

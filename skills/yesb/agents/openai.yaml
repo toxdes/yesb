@@ -1,4 +1,4 @@
 interface:
   display_name: "Yesb Releases"
-  short_description: "Build and publish Linux release packages"
+  short_description: "Build and publish application releases"
   default_prompt: "Use $yesb to add or run the release workflow for this project."

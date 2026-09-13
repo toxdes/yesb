@@ -1,6 +1,6 @@
 ---
 name: yesb
-description: Configure, build, validate, and publish Linux application releases with the toxdes/yesb toolkit. Use when a project needs a yesb submodule, release.toml, a compatible Dockerfile packaging stage, Debian or RPM repositories, AUR packages, release archives, checksums, Cloudflare R2 uploads, or Cloudflare cache operations.
+description: Configure, build, validate, and publish application releases with the toxdes/yesb toolkit. Use when a project needs a yesb submodule, release.toml, a compatible Dockerfile packaging stage, Debian or RPM repositories, AUR packages, direct release artifacts, Homebrew taps, checksums, Cloudflare R2 uploads, or Cloudflare cache operations.
 ---
 
 # Yesb releases
@@ -35,7 +35,9 @@ the Yesb scripts unless the user is changing the toolkit itself.
    Add `--include-appimage` only when the container supplies the AppImage
    runtime and tools. Use `--project-root PATH` when invoked elsewhere.
 7. Verify every configured architecture has the expected `.deb`, `.rpm`, and
-   `.tar.gz`, plus matching `.sha256` entries and `SHA256SUMS`.
+   `.tar.gz`, plus matching `.sha256` entries and `SHA256SUMS`. Verify declared
+   generic release artifacts as well; they may be Linux, Windows, macOS, or any
+   other file type.
    RPM files must use `package-version-release.arch.rpm`; APT architectures
    and Docker platforms must be declared in matching order. Supported targets
    are currently `linux/amd64` and `linux/arm64`.
@@ -101,15 +103,18 @@ then run only the requested publisher:
 ./yesb/release_apt.py --env PATH
 ./yesb/release_rpm.py --env PATH
 ./yesb/release_aur.py --env PATH --type git|bin|both
+./yesb/release_direct.py --env PATH
+./yesb/release_homebrew.py --env PATH
 ./yesb/cf_purge_cache.py HOSTNAME --env PATH
 ```
 
 R2 publishing requires `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 `AWS_ENDPOINT_URL`, and `AWS_BUCKET`; `R2_REGION` defaults to `auto`. Signing is
 enabled by `GPG_KEY_ID`, with optional `GPG_PASSPHRASE`. AUR publishing also
-requires working SSH authentication to the configured AUR host. Production
-APT and RPM uploads refuse unsigned publication unless the user explicitly
-requests `--allow-unsigned`.
+requires working SSH authentication to the configured AUR host. Homebrew
+publishing requires Git credentials for its configured tap remote but does not
+require R2 credentials. Production APT and RPM uploads refuse unsigned
+publication unless the user explicitly requests `--allow-unsigned`.
 
 For non-Arch hosts, configure `[aur].srcinfo_helper_image` with a full
 SHA-256-pinned helper image. Yesb delegates only `.SRCINFO` generation to that

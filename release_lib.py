@@ -16,9 +16,7 @@ SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
 SUPPORTED_DEB_ARCHITECTURES = ("amd64", "arm64")
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.-]*$")
 SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._~]*$")
-PINNED_IMAGE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*@sha256:[0-9a-f]{64}$"
-)
+PINNED_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*@sha256:[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -64,7 +62,16 @@ def load_config(path=None):
         print(f"Error: [project] is missing: {names}", file=sys.stderr)
         sys.exit(1)
 
-    for name in ("build", "package", "deb", "rpm", "hosting", "aur"):
+    for name in (
+        "build",
+        "package",
+        "release",
+        "deb",
+        "rpm",
+        "hosting",
+        "aur",
+        "homebrew",
+    ):
         section = data.get(name, {})
         if not isinstance(section, dict):
             _config_error(f"[{name}] must be a table")
@@ -159,6 +166,7 @@ def validate_config(config, operation):
         _validate_assets(config)
         _validate_string_list(config.section("deb"), "depends", "[deb]")
         _validate_string_list(config.section("rpm"), "requires", "[rpm]")
+        _validate_release_artifacts(config, require_sources=True)
         _validate_hosting(config)
 
     elif operation == "apt":
@@ -189,12 +197,21 @@ def validate_config(config, operation):
         _validate_string_list(config.section("aur"), "depends", "[aur]")
         helper_image = config.section("aur").get("srcinfo_helper_image")
         if helper_image is not None and (
-            not isinstance(helper_image, str) or not PINNED_IMAGE.fullmatch(helper_image)
+            not isinstance(helper_image, str)
+            or not PINNED_IMAGE.fullmatch(helper_image)
         ):
             _config_error(
                 "[aur].srcinfo_helper_image must be a Docker image pinned by a sha256 digest"
             )
         _validate_hosting(config)
+    elif operation == "direct":
+        project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
+        _validate_release_artifacts(config)
+        _validate_hosting(config)
+    elif operation == "homebrew":
+        project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
+        _validate_release_artifacts(config)
+        _validate_homebrew(config)
     else:
         raise ValueError(f"Unknown validation operation: {operation}")
 
@@ -278,6 +295,138 @@ def _validate_assets(config):
             project_path(
                 config, appimage[key], f"[package.appimage].{key}", kind="file"
             )
+
+
+def _validate_release_artifacts(config, *, require_sources=False):
+    release = config.section("release")
+    artifacts = release.get("artifacts", [])
+    if not isinstance(artifacts, list):
+        _config_error("[release].artifacts must be an array of tables")
+
+    names = set()
+    for index, artifact in enumerate(artifacts):
+        label = f"[release.artifacts][{index}]"
+        if not isinstance(artifact, dict):
+            _config_error(f"{label} must be a table")
+        name = _require_string(artifact, "name", label)
+        rendered = render_artifact_name(name, "0")
+        if rendered != name.replace("{version}", "0"):
+            _config_error(f"{label}.name may only contain the {{version}} placeholder")
+        if (
+            Path(rendered).name != rendered
+            or rendered in {".", ".."}
+            or "\\" in rendered
+        ):
+            _config_error(
+                f"{label}.name must be a filename without directory components"
+            )
+        if rendered in names:
+            _config_error(f"{label}.name duplicates another release artifact")
+        names.add(rendered)
+
+        for key in ("platform", "architecture"):
+            if key in artifact:
+                value = _require_string(artifact, key, label)
+                if not SAFE_IDENTIFIER.fullmatch(value):
+                    _config_error(f"{label}.{key} contains unsupported characters")
+
+        source = artifact.get("source")
+        if source is not None:
+            project_path(
+                config,
+                source,
+                f"{label}.source",
+                kind="file" if require_sources else None,
+            )
+        elif require_sources:
+            continue
+
+
+def render_artifact_name(name, version):
+    """Render an artifact filename using the project version."""
+    try:
+        rendered = name.format(version=version)
+    except (IndexError, KeyError, ValueError) as error:
+        _config_error(f"invalid release artifact name {name!r}: {error}")
+    if "{" in rendered or "}" in rendered:
+        _config_error(
+            "release artifact names may only contain the {version} placeholder"
+        )
+    return rendered
+
+
+def release_artifacts(config, version):
+    """Return configured release artifacts with rendered names and source paths."""
+    _validate_release_artifacts(config)
+    result = []
+    for artifact in config.section("release").get("artifacts", []):
+        item = dict(artifact)
+        item["name"] = render_artifact_name(artifact["name"], version)
+        if "source" in artifact:
+            item["source_path"] = project_path(
+                config,
+                artifact["source"],
+                "[release.artifacts].source",
+            )
+        result.append(item)
+    return result
+
+
+def _validate_homebrew(config):
+    homebrew = config.section("homebrew")
+    if not homebrew:
+        _config_error("missing [homebrew] section")
+
+    tap = _require_string(homebrew, "tap", "[homebrew]")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", tap):
+        _config_error("[homebrew].tap must use the owner/repository form")
+    formula = _require_string(homebrew, "formula", "[homebrew]")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9+._-]*", formula):
+        _config_error("[homebrew].formula contains unsupported characters")
+    if "remote" in homebrew:
+        _require_string(homebrew, "remote", "[homebrew]")
+    if "branch" in homebrew:
+        _require_string(homebrew, "branch", "[homebrew]")
+
+    binary = homebrew.get(
+        "binary", config.section("package").get("binary", config.project["id"])
+    )
+    if not isinstance(binary, str) or not binary.strip():
+        _config_error("[homebrew].binary must be a non-empty archive path")
+    binary_path = Path(binary)
+    if binary_path.is_absolute() or ".." in binary_path.parts:
+        _config_error("[homebrew].binary must be a relative archive path")
+
+    archives = homebrew.get("archives", [])
+    if not isinstance(archives, list) or not archives:
+        _config_error("[homebrew].archives must be a non-empty array of tables")
+    release_names = {artifact["name"] for artifact in release_artifacts(config, "0")}
+    architectures = set()
+    for index, archive in enumerate(archives):
+        label = f"[homebrew.archives][{index}]"
+        if not isinstance(archive, dict):
+            _config_error(f"{label} must be a table")
+        artifact = _require_string(archive, "artifact", label)
+        artifact_name = render_artifact_name(artifact, "0")
+        if artifact_name not in release_names:
+            _config_error(f"{label}.artifact must name a [release.artifacts] entry")
+        architecture = _require_string(archive, "architecture", label)
+        if architecture not in {"x86_64", "arm64", "universal"}:
+            _config_error(f"{label}.architecture must be x86_64, arm64, or universal")
+        if architecture in architectures:
+            _config_error(f"{label}.architecture is duplicated")
+        architectures.add(architecture)
+        url = _require_string(archive, "url", label)
+        if not url.startswith("https://"):
+            _config_error(f"{label}.url must be an https:// URL")
+
+    if ("universal" in architectures and len(architectures) != 1) or (
+        "universal" not in architectures and architectures != {"x86_64", "arm64"}
+    ):
+        _config_error(
+            "[homebrew.archives] must provide both x86_64 and arm64, or "
+            "one universal archive"
+        )
 
 
 def _validate_string_list(section, key, label):
@@ -453,6 +602,19 @@ def upload_file(path, key):
     """Upload one file to the configured R2 bucket."""
     client, bucket = r2_client()
     client.upload_file(str(path), bucket, key)
+    print(f"  {key}")
+
+
+def upload_text(content, key):
+    """Upload a small text object to the configured R2 bucket."""
+    client, bucket = r2_client()
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=content.encode(),
+        ContentType="text/plain",
+        CacheControl="public, max-age=31536000, immutable",
+    )
     print(f"  {key}")
 
 

@@ -41,6 +41,34 @@ Yesb always supplies default `VERSION` and `GIT_SHA` build arguments unless
 they are explicitly set in `[build.args]`. It supplies `INCLUDE_APPIMAGE=1`
 when requested on the command line.
 
+## Release artifacts
+
+Release artifacts are opaque files that can be served directly, regardless of
+their operating system or file type:
+
+```toml
+[[release.artifacts]]
+source = "artifacts/myapp-windows.zip"       # optional external input
+name = "myapp-{version}-windows.zip"
+platform = "windows"                         # optional metadata
+architecture = "x86_64"                      # optional metadata
+
+[[release.artifacts]]
+name = "myapp_{version}_amd64.tar.gz"        # emitted by the build
+
+[[release.artifacts]]
+name = "myapp-{version}-amd64.AppImage"      # emitted by --include-appimage
+```
+
+`name` is the final filename and may contain the `{version}` placeholder.
+When `source` is set, `build_all.py` copies that project-relative file into the
+build output. When it is omitted, the project can emit the named file through a
+separate build step before running `release_direct.py`. `build_all.py` leaves
+such source-less artifacts independent of its Docker output. `platform` and
+`architecture` are optional descriptive metadata. `release_direct.py` uploads
+every configured artifact to the `[hosting].release_prefix` prefix and also
+publishes a matching `.sha256` file.
+
 ## Package contents
 
 ```toml
@@ -119,3 +147,31 @@ depends = ["example-lib"]
 
 `public_base_url` is required for usable generated binary AUR download URLs.
 Binary AUR publishing expects both amd64 and arm64 release archives.
+
+## Homebrew
+
+Homebrew publishing is optional and updates a project-owned tap:
+
+```toml
+[homebrew]
+tap = "yourorg/tap"
+remote = "git@github.com:yourorg/homebrew-tap.git"  # optional GitHub default
+branch = "main"                                      # default
+formula = "myapp"
+binary = "myapp"                                     # defaults to package.binary
+
+[[homebrew.archives]]
+artifact = "myapp-{version}-macos-x86_64.zip"
+architecture = "x86_64"
+url = "https://packages.example.com/releases/myapp-{version}-macos-x86_64.zip"
+
+[[homebrew.archives]]
+artifact = "myapp-{version}-macos-arm64.zip"
+architecture = "arm64"
+url = "https://packages.example.com/releases/myapp-{version}-macos-arm64.zip"
+```
+
+Archives must name entries from `[[release.artifacts]]`. Provide both Intel and
+Apple Silicon archives, or one `universal` archive. `release_homebrew.py`
+calculates checksums locally, writes `Formula/myapp.rb`, and pushes the tap; it
+does not upload files or require R2 credentials.
