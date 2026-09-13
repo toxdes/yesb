@@ -17,6 +17,19 @@ SUPPORTED_DEB_ARCHITECTURES = ("amd64", "arm64")
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.-]*$")
 SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._~]*$")
 PINNED_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*@sha256:[0-9a-f]{64}$")
+HOMEBREW_INSTALL_METHODS = {
+    "bin",
+    "sbin",
+    "lib",
+    "libexec",
+    "include",
+    "share",
+    "etc",
+    "var",
+    "doc",
+    "man",
+    *(f"man{number}" for number in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -396,6 +409,24 @@ def _validate_homebrew(config):
     binary_path = Path(binary)
     if binary_path.is_absolute() or ".." in binary_path.parts:
         _config_error("[homebrew].binary must be a relative archive path")
+
+    assets = homebrew.get("assets", [])
+    if not isinstance(assets, list):
+        _config_error("[homebrew].assets must be an array of tables")
+    for index, asset in enumerate(assets):
+        label = f"[homebrew.assets][{index}]"
+        if not isinstance(asset, dict):
+            _config_error(f"{label} must be a table")
+        source = _require_string(asset, "source", label)
+        source_path = Path(source)
+        if source_path.is_absolute() or ".." in source_path.parts:
+            _config_error(f"{label}.source must be a relative archive path")
+        destination = _require_string(asset, "destination", label)
+        if destination not in HOMEBREW_INSTALL_METHODS:
+            methods = ", ".join(sorted(HOMEBREW_INSTALL_METHODS))
+            _config_error(
+                f"{label}.destination must be one of the supported install methods: {methods}"
+            )
 
     archives = homebrew.get("archives", [])
     if not isinstance(archives, list) or not archives:

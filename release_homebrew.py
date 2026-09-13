@@ -119,11 +119,13 @@ def generate_formula(config, version, archives):
             "",
             "  def install",
             f"    bin.install {ruby_string(binary)}",
-            "  end",
-            "end",
-            "",
         ]
     )
+    for asset in homebrew.get("assets", []):
+        lines.append(
+            f"    {asset['destination']}.install {ruby_string(asset['source'])}"
+        )
+    lines.extend(["  end", "end", ""])
     return "\n".join(lines)
 
 

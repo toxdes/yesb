@@ -28,6 +28,10 @@ tap = "example/tap"
 formula = "example"
 binary = "example"
 
+[[homebrew.assets]]
+source = "share/man/man1/example.1"
+destination = "man1"
+
 [[homebrew.archives]]
 artifact = "example-{version}-macos-x86_64.zip"
 architecture = "x86_64"
@@ -60,6 +64,9 @@ class HomebrewFormulaTests(unittest.TestCase):
             self.assertIn("on_intel do", formula)
             self.assertIn("on_arm do", formula)
             self.assertIn('bin.install "example"', formula)
+            self.assertIn(
+                'man1.install "share/man/man1/example.1"', formula
+            )
             self.assertIn(
                 "https://downloads.example.com/example-1.2.3-macos-x86_64.zip", formula
             )

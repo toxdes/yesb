@@ -101,6 +101,10 @@ branch = "main"
 formula = "myapp"
 binary = "myapp"
 
+[[homebrew.assets]]
+source = "share/man/man1/myapp.1"
+destination = "man1"
+
 [[homebrew.archives]]
 artifact = "myapp-{version}-macos-x86_64.zip"
 architecture = "x86_64"
@@ -118,7 +122,10 @@ Publish the formula with:
 ./yesb/release_homebrew.py
 ```
 
-This updates and pushes the tap repository only; it does not upload artifacts.
+Optional `[[homebrew.assets]]` entries install additional files from the archive
+using standard Homebrew installation methods such as `man1`, `share`, or
+`include`. This updates and pushes the tap repository only; it does not upload
+artifacts.
 Users can install the formula with `brew install yourorg/tap/myapp`.
 
 To inspect repositories without publishing them:

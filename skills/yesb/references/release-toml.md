@@ -160,6 +160,10 @@ branch = "main"                                      # default
 formula = "myapp"
 binary = "myapp"                                     # defaults to package.binary
 
+[[homebrew.assets]]
+source = "share/man/man1/myapp.1"                     # path inside the archive
+destination = "man1"                                  # Homebrew install method
+
 [[homebrew.archives]]
 artifact = "myapp-{version}-macos-x86_64.zip"
 architecture = "x86_64"
@@ -174,4 +178,7 @@ url = "https://packages.example.com/releases/myapp-{version}-macos-arm64.zip"
 Archives must name entries from `[[release.artifacts]]`. Provide both Intel and
 Apple Silicon archives, or one `universal` archive. `release_homebrew.py`
 calculates checksums locally, writes `Formula/myapp.rb`, and pushes the tap; it
-does not upload files or require R2 credentials.
+does not upload files or require R2 credentials. Optional `[[homebrew.assets]]`
+entries install additional archive contents with standard Homebrew methods,
+such as `man1`, `share`, and `include`; `binary` remains the shorthand for the
+required executable installed into `bin`.
