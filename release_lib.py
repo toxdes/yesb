@@ -16,6 +16,8 @@ SUPPORTED_PLATFORMS = ("linux/amd64", "linux/arm64")
 SUPPORTED_DEB_ARCHITECTURES = ("amd64", "arm64")
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.-]*$")
 SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._~]*$")
+DOCKER_IMAGE = re.compile(r"^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$")
+DOCKER_TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 PINNED_IMAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*@sha256:[0-9a-f]{64}$")
 HOMEBREW_INSTALL_METHODS = {
     "bin",
@@ -84,6 +86,7 @@ def load_config(path=None):
         "hosting",
         "aur",
         "homebrew",
+        "docker",
     ):
         section = data.get(name, {})
         if not isinstance(section, dict):
@@ -225,6 +228,8 @@ def validate_config(config, operation):
         project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
         _validate_release_artifacts(config)
         _validate_homebrew(config)
+    elif operation == "docker":
+        _validate_docker(config)
     else:
         raise ValueError(f"Unknown validation operation: {operation}")
 
@@ -460,6 +465,57 @@ def _validate_homebrew(config):
         )
 
 
+def _validate_docker(config):
+    """Validate configuration for the optional Docker image publisher."""
+    docker = config.section("docker")
+    if not docker:
+        _config_error("missing [docker] section")
+
+    image = _require_string(docker, "image", "[docker]")
+    if (
+        not DOCKER_IMAGE.fullmatch(image)
+        or "//" in image
+        or ".." in image
+        or ":" in image.rsplit("/", 1)[-1]
+        or "@" in image
+    ):
+        _config_error(
+            "[docker].image must be an OCI image name without a tag or digest"
+        )
+
+    project_path(
+        config,
+        docker.get("context", "."),
+        "[docker].context",
+        allow_root=True,
+        kind="directory",
+    )
+    project_path(
+        config,
+        docker.get("dockerfile", "Dockerfile.runtime"),
+        "[docker].dockerfile",
+        kind="file",
+    )
+    _validate_platforms(docker)
+
+    target = docker.get("target")
+    if target is not None and (
+        not isinstance(target, str) or not SAFE_IDENTIFIER.fullmatch(target)
+    ):
+        _config_error("[docker].target contains unsupported characters")
+
+    publish_latest = docker.get("publish_latest", False)
+    if not isinstance(publish_latest, bool):
+        _config_error("[docker].publish_latest must be true or false")
+
+    args = docker.get("args", {})
+    if not isinstance(args, dict) or any(
+        not isinstance(key, str) or not isinstance(value, (str, int, float, bool))
+        for key, value in args.items()
+    ):
+        _config_error("[docker].args must contain scalar values")
+
+
 def _validate_string_list(section, key, label):
     values = section.get(key, [])
     if not isinstance(values, list) or any(
@@ -602,6 +658,41 @@ def check_tools(*tools):
     if missing:
         print("Missing required tool(s): " + ", ".join(missing), file=sys.stderr)
         sys.exit(1)
+
+
+def check_builder_platforms(platforms):
+    """Fail early when the active Buildx builder lacks a requested platform."""
+    result = subprocess.run(
+        ["docker", "buildx", "inspect", "--bootstrap"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    platform_line = next(
+        (
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip().startswith("Platforms:")
+        ),
+        "",
+    )
+    available = {
+        value.strip().rstrip("*")
+        for value in platform_line.removeprefix("Platforms:").split(",")
+        if value.strip()
+    }
+    missing = [
+        platform
+        for platform in platforms
+        if platform not in available
+        and not any(value.startswith(platform + "/") for value in available)
+    ]
+    if missing:
+        names = ", ".join(missing)
+        raise RuntimeError(
+            f"Buildx builder does not support: {names}. "
+            "Configure binfmt/QEMU explicitly, then inspect the builder again."
+        )
 
 
 def r2_client():

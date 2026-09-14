@@ -1,6 +1,6 @@
 ---
 name: yesb
-description: Configure, build, validate, and publish application releases with the toxdes/yesb toolkit. Use when a project needs a yesb submodule, release.toml, a compatible Dockerfile packaging stage, Debian or RPM repositories, AUR packages, direct release artifacts, Homebrew taps, checksums, Cloudflare R2 uploads, or Cloudflare cache operations.
+description: Configure, build, validate, and publish application releases with the toxdes/yesb toolkit. Use when a project needs a yesb submodule, release.toml, a compatible Dockerfile packaging stage, Debian or RPM repositories, AUR packages, direct release artifacts, Homebrew taps, optional Docker images, checksums, Cloudflare R2 uploads, or Cloudflare cache operations.
 ---
 
 # Yesb releases
@@ -105,8 +105,15 @@ then run only the requested publisher:
 ./yesb/release_aur.py --env PATH --type git|bin|both
 ./yesb/release_direct.py --env PATH
 ./yesb/release_homebrew.py --env PATH
+./yesb/release_docker.py --env PATH
 ./yesb/cf_purge_cache.py HOSTNAME --env PATH
 ```
+
+Docker image publishing is optional and independent of package, archive, R2,
+Homebrew, and AUR publishing. The project owns the runtime Dockerfile and
+configures `[docker]`; Yesb builds it with Buildx and pushes the version tag,
+plus `latest` only when `publish_latest = true`. Docker credentials must be
+configured outside the project manifest.
 
 R2 publishing requires `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 `AWS_ENDPOINT_URL`, and `AWS_BUCKET`; `R2_REGION` defaults to `auto`. Signing is

@@ -3,7 +3,8 @@
 Yesb is a small build and release toolkit for applications. It gives
 independent projects one repeatable path from a Docker build to Debian, RPM,
 archive, optional AppImage, and other release artifacts, then publishes package
-repositories, direct downloads, and AUR packages when needed.
+repositories, direct downloads, optional Docker images, and AUR packages when
+needed.
 
 The intended setup is to add Yesb as a submodule. The application keeps its
 own `release.toml`, version file, and Dockerfile, so release policy stays with
@@ -35,6 +36,12 @@ platforms = ["linux/amd64", "linux/arm64"]
 
 [package]
 binary = "myapp"
+
+[docker]
+image = "docker.io/yourorg/myapp"
+dockerfile = "Dockerfile.runtime"
+platforms = ["linux/amd64", "linux/arm64"]
+publish_latest = false
 
 [deb]
 package_name = "myapp"
@@ -86,6 +93,36 @@ To publish declared artifacts as direct downloads:
 
 The files are uploaded under the configured `release_prefix` without regard to
 their operating system or file type. Existing versioned objects are skipped.
+
+### Docker image
+
+Docker image publishing is optional and independent of the package and archive
+release flows. The project owns the runtime Dockerfile; yesb only builds it
+with Buildx and pushes the configured version tag. Docker credentials must be
+configured separately with `docker login` or a credential helper.
+
+```toml
+[docker]
+image = "docker.io/yourorg/myapp"
+dockerfile = "Dockerfile.runtime"
+context = "."
+platforms = ["linux/amd64", "linux/arm64"]
+publish_latest = false
+
+[docker.args]
+EXAMPLE = "value"
+```
+
+The image is published as `yourorg/myapp:<version>`. Set
+`publish_latest = true` to also move the `latest` tag to this release. Use
+`target` when the runtime image is a named stage in a shared Dockerfile.
+
+```sh
+./yesb/release_docker.py
+```
+
+Use `--dry-run` to inspect the Buildx command without publishing. Projects
+without `[docker]` skip this step.
 
 ### Homebrew tap
 
@@ -171,6 +208,8 @@ prevents republishing a retired version; bump the version to publish again.
 - AUR publishing: `git`, `ssh`, and an authenticated AUR account; either local
   `makepkg` or Docker when `[aur].srcinfo_helper_image` is configured
 - Homebrew publishing: `git` and credentials for the configured tap remote
+- Docker publishing: Docker with Buildx and credentials for the configured
+  registry
 - Package container: `dpkg-deb`, `rpmbuild`, and `tar`; AppImage builds also
   need `ldd`, `glib-compile-schemas`, `mksquashfs`, and an AppImage runtime
 

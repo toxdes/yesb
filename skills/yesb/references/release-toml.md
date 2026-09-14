@@ -41,6 +41,33 @@ Yesb always supplies default `VERSION` and `GIT_SHA` build arguments unless
 they are explicitly set in `[build.args]`. It supplies `INCLUDE_APPIMAGE=1`
 when requested on the command line.
 
+## Docker images
+
+Docker image publishing is optional and independent of `build_all.py` and the
+other release publishers. Configure the project's runtime image separately:
+
+```toml
+[docker]
+image = "docker.io/yourorg/myapp"       # no tag or digest
+dockerfile = "Dockerfile.runtime"       # default
+context = "."                           # default
+platforms = ["linux/amd64", "linux/arm64"]
+target = "runtime"                      # optional named stage
+publish_latest = false                   # default
+
+[docker.args]
+EXAMPLE = "value"
+```
+
+The publisher always pushes `<image>:<project version>`. When
+`publish_latest = true`, it also pushes `<image>:latest`, moving that mutable
+alias to the current release. Registry credentials are not stored in the
+manifest and must already be configured with Docker. Run
+`release_docker.py --dry-run` to inspect the command without publishing.
+
+The runtime Dockerfile and its contents remain project-specific. This section
+does not change the packaging Dockerfile used by `build_all.py`.
+
 ## Release artifacts
 
 Release artifacts are opaque files that can be served directly, regardless of

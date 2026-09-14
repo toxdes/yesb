@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 
 from release_lib import (
+    check_builder_platforms,
     load_config,
     project_path,
     project_version,
@@ -84,41 +85,6 @@ def git_revision(context):
     )
     revision = result.stdout.strip()
     return revision if result.returncode == 0 and revision else "unknown"
-
-
-def check_builder_platforms(platforms):
-    """Fail early when the active Buildx builder lacks a requested platform."""
-    result = subprocess.run(
-        ["docker", "buildx", "inspect", "--bootstrap"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    platform_line = next(
-        (
-            line.strip()
-            for line in result.stdout.splitlines()
-            if line.strip().startswith("Platforms:")
-        ),
-        "",
-    )
-    available = {
-        value.strip().rstrip("*")
-        for value in platform_line.removeprefix("Platforms:").split(",")
-        if value.strip()
-    }
-    missing = [
-        platform
-        for platform in platforms
-        if platform not in available
-        and not any(value.startswith(platform + "/") for value in available)
-    ]
-    if missing:
-        names = ", ".join(missing)
-        raise RuntimeError(
-            f"Buildx builder does not support: {names}. "
-            "Configure binfmt/QEMU explicitly, then inspect the builder again."
-        )
 
 
 def validate_artifacts(output_dir, config, platforms, version, include_appimage):
