@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build with an explicitly digest-pinned Arch base, for example:
 #   docker build --build-arg ARCH_BASE=archlinux:base-devel@sha256:<digest> \
-#     -f aur-helper.Dockerfile -t registry.example.com/yesb-aur-helper:1 .
+#     -f aur-helper.Dockerfile -t docker.io/toxdes/yesb-aur-helper:latest .
 
 ARG ARCH_BASE
 FROM ${ARCH_BASE}

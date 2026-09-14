@@ -51,7 +51,7 @@ platform = "windows"                    # optional metadata
 architecture = "x86_64"                 # optional metadata
 
 [aur]
-# srcinfo_helper_image = "ghcr.io/toxdes/yesb-aur-helper@sha256:<64 lowercase hex digits>"
+# srcinfo_helper_image = "docker.io/toxdes/yesb-aur-helper@sha256:<64 lowercase hex digits>"
 
 [hosting]
 public_base_url = "https://packages.example.com"
