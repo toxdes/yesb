@@ -175,6 +175,10 @@ depends = ["example-lib"]
 
 `public_base_url` is required for usable generated binary AUR download URLs.
 Binary AUR publishing expects both amd64 and arm64 release archives.
+Recommend installing `myapp-bin` for normal use and `myapp-git` for development
+source builds. Keep the `-bin` suffix for prebuilt open-source software;
+`package_name` identifies the canonical dependency name, not an installation
+alias or an AUR helper's default selection.
 
 Both variants default to providing the canonical package at the published
 version and conflicting with its unversioned name. A generated `myapp-bin`

@@ -85,6 +85,11 @@ Buildx builds use the project's container image, independent of the host Linux
 distribution. Check host executables for publishing rather than assuming
 Ubuntu, Debian or Arch; APT/RPM repository tools still run on the host.
 
+Recommend `yay -S myapp-bin` as the normal AUR installation command. Keep
+`-git` as the source-build alternative and preserve the `-bin` suffix for
+prebuilt open-source software. AUR `provides` does not make an unsuffixed
+install request select that variant.
+
 Generated AUR binary recipes provide the canonical package at `${pkgver}` and
 conflict with its base name. Project-owned `-git` recipes must declare the same
 relationships with an expanded version. Yesb validates their evaluated

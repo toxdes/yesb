@@ -177,6 +177,18 @@ The publishing scripts also accept `--env PATH` for `KEY=VALUE` files.
 
 ### AUR package alternatives
 
+Recommend the prebuilt `myapp-bin` package for normal installations:
+
+```sh
+yay -S myapp-bin
+```
+
+Keep the `-bin` suffix when source is available, as required by the
+[AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines).
+Offer `myapp-git` separately for users who want to build the development
+version from source. `provides` satisfies dependencies on `myapp`; it does not
+make an unsuffixed `yay -S myapp` request select the binary variant.
+
 Generated binary recipes declare `provides=("myapp=${pkgver}")` and
 `conflicts=('myapp')`, using `[project].id` as the base name. Set
 `[aur].package_name` when the canonical package name differs from that ID.
