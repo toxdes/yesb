@@ -24,19 +24,22 @@ Environment:
 
 import argparse
 import atexit
+import gzip
+import hashlib
 import http.server
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+import xml.etree.ElementTree as ET
+from pathlib import Path, PurePosixPath
 
 from release_lib import (
     acquire_r2_lock,
     check_tools,
     delete_keys,
-    download_prefix,
+    download_optional,
     load_config,
     load_env_file,
     list_prefix,
@@ -48,6 +51,86 @@ from release_lib import (
     validate_config,
     write_release_marker,
 )
+
+RPMMD = "http://linux.duke.edu/metadata/repo"
+COMMON = "http://linux.duke.edu/metadata/common"
+
+
+def rpm_package_name(path):
+    """Read the name from Yesb's name-version-release.arch.rpm convention."""
+    parts = PurePosixPath(path).name.rsplit("-", 2)
+    if len(parts) != 3 or not all(parts) or not parts[-1].endswith(".rpm"):
+        raise RuntimeError(f"Unexpected RPM filename: {path}")
+    return parts[0]
+
+
+def metadata_records(repomd):
+    records = {}
+    for entry in ET.parse(repomd).getroot().findall(f"{{{RPMMD}}}data"):
+        kind = entry.get("type")
+        if kind not in {"primary", "filelists", "other"}:
+            continue
+        location = entry.find(f"{{{RPMMD}}}location")
+        href = location.get("href", "") if location is not None else ""
+        path = PurePosixPath(href)
+        if (
+            path.is_absolute() or ".." in path.parts or "\\" in href
+            or len(path.parts) != 2 or path.parts[0] != "repodata"
+            or kind in records
+        ):
+            raise RuntimeError(f"Unsafe or duplicate RPM metadata location: {href}")
+        records[kind] = (href, entry)
+    if set(records) != {"primary", "filelists", "other"}:
+        raise RuntimeError("RPM repository is missing primary, filelists or other metadata")
+    return records
+
+
+def load_existing_metadata(prefix, destination, existing_package_keys):
+    """Download only the XML indexes referenced by the repository entry point."""
+    repomd = destination / "repodata/repomd.xml"
+    repomd.parent.mkdir(parents=True, exist_ok=True)
+    if not download_optional(f"{prefix}/repodata/repomd.xml", repomd):
+        if existing_package_keys:
+            raise RuntimeError("Existing RPM payloads have no repository metadata; refusing to drop them")
+        return None
+    for href, entry in metadata_records(repomd).values():
+        path = destination / href
+        if not download_optional(f"{prefix}/{href}", path):
+            raise RuntimeError(f"Missing existing RPM metadata: {href}")
+        checksum = entry.find(f"{{{RPMMD}}}checksum")
+        algorithm = checksum.get("type", "") if checksum is not None else ""
+        algorithm = "sha1" if algorithm == "sha" else algorithm
+        if algorithm not in {"sha1", "sha256", "sha512"}:
+            raise RuntimeError(f"Unsupported RPM metadata checksum: {algorithm}")
+        with path.open("rb") as body:
+            digest = hashlib.file_digest(body, algorithm).hexdigest()
+        if digest != checksum.text:
+            raise RuntimeError(f"RPM metadata checksum mismatch: {href}")
+    return destination
+
+
+def retained_rpm_paths(prefix, keys, package_name):
+    retained = []
+    for key in keys:
+        relative = key.removeprefix(prefix.rstrip("/") + "/")
+        path = PurePosixPath(relative)
+        if (
+            relative == key or path.is_absolute() or ".." in path.parts
+            or "\n" in relative or "\r" in relative or "\\" in relative
+        ):
+            raise RuntimeError(f"Unsafe RPM object key: {key}")
+        if rpm_package_name(relative) != package_name:
+            retained.append(relative)
+    return retained
+
+
+def validate_package_locations(rpm_dir, expected):
+    href, _entry = metadata_records(rpm_dir / "repodata/repomd.xml")["primary"]
+    with gzip.open(rpm_dir / href, "rb") as body:
+        root = ET.parse(body).getroot()
+    actual = [entry.get("href") for entry in root.findall(f"{{{COMMON}}}package/{{{COMMON}}}location")]
+    if len(actual) != len(expected) or set(actual) != set(expected):
+        raise RuntimeError("Generated RPM metadata does not match the required package set")
 
 
 def find_rpms(dist, package_name, version, release, platforms):
@@ -63,7 +146,7 @@ def find_rpms(dist, package_name, version, release, platforms):
     return rpms
 
 
-def build_repo(root_dir, rpms, prefix, package_name):
+def build_repo(root_dir, rpms, prefix, package_name, *, existing_metadata=None, existing_package_keys=()):
     rpm_dir = root_dir / prefix
     rpm_dir.mkdir(parents=True, exist_ok=True)
 
@@ -71,7 +154,7 @@ def build_repo(root_dir, rpms, prefix, package_name):
         if (
             path.is_file()
             and path.suffix == ".rpm"
-            and path.name.startswith(f"{package_name}-")
+            and rpm_package_name(path.name) == package_name
         ):
             path.unlink()
 
@@ -85,10 +168,20 @@ def build_repo(root_dir, rpms, prefix, package_name):
     if gpg_key:
         sign_rpms(current_rpms, gpg_key)
 
-    subprocess.run(
-        ["createrepo_c", str(rpm_dir)],
-        check=True,
-    )
+    expected = retained_rpm_paths(prefix, existing_package_keys, package_name)
+    expected.extend(rpm.name for rpm in rpms)
+    command = ["createrepo_c", "--general-compress-type", "gz", "--error-exit-val"]
+    with tempfile.TemporaryDirectory(prefix="yesb-rpm-index-") as directory:
+        if existing_metadata is not None:
+            pkglist = Path(directory) / "packages.txt"
+            pkglist.write_text("\n".join(sorted(expected)) + "\n")
+            # immutable filenames let createrepo reuse metadata without payloads
+            command.extend([
+                "--update", "--skip-stat", "--update-md-path", str(existing_metadata),
+                "--pkglist", str(pkglist),
+            ])
+        subprocess.run([*command, str(rpm_dir)], check=True)
+    validate_package_locations(rpm_dir, expected)
 
 
 def pre_cache_gpg_key(key_id, passphrase=None):
@@ -249,6 +342,7 @@ def main():
         atexit.register(shutil.rmtree, repo, ignore_errors=True)
     existing_package_keys = []
     existing_marker_keys = []
+    existing_metadata = None
     current_package_keys = {f"{prefix}/{rpm.name}" for rpm in rpms}
     if not args.dry_run and not args.serve:
         release_lock = acquire_r2_lock(f"{prefix}/.publish.lock")
@@ -264,7 +358,7 @@ def main():
                 [
                     key
                     for key in existing_package_keys
-                    if key.startswith(f"{prefix}/{package_name}-")
+                    if rpm_package_name(key) == package_name
                 ]
                 + existing_marker_keys,
                 current_package_keys
@@ -275,12 +369,17 @@ def main():
         except ValueError as error:
             print(f"Error: {error}", file=sys.stderr)
             return 1
-        print("Reading existing shared RPM payloads from R2 ...")
-        existing = download_prefix(prefix, repo_path / prefix, suffix=".rpm")
-        print(f"Found {len(existing)} existing RPM(s).")
+        print("Reading existing shared RPM metadata from R2 ...")
+        existing_dir = Path(tempfile.mkdtemp(prefix="yesb-rpm-existing-"))
+        atexit.register(shutil.rmtree, existing_dir, ignore_errors=True)
+        existing_metadata = load_existing_metadata(prefix, existing_dir, existing_package_keys)
+        print(f"Found {len(existing_package_keys)} existing RPM object(s); no payload downloads.")
 
     print(f"\nBuilding RPM repository in {repo} ...")
-    build_repo(repo_path, rpms, prefix, package_name)
+    build_repo(
+        repo_path, rpms, prefix, package_name,
+        existing_metadata=existing_metadata, existing_package_keys=existing_package_keys,
+    )
 
     if args.serve:
         serve_repo(repo_path, prefix=prefix, package_name=package_name)
@@ -307,7 +406,7 @@ def main():
         stale_package_keys = sorted(
             key
             for key in existing_package_keys
-            if key.startswith(f"{prefix}/{package_name}-")
+            if rpm_package_name(key) == package_name
             and key not in current_package_keys
         )
         if stale_package_keys:

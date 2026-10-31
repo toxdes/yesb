@@ -175,10 +175,33 @@ To inspect repositories without publishing them:
 Pass `--project-root PATH` when running a script outside the application root.
 The publishing scripts also accept `--env PATH` for `KEY=VALUE` files.
 
+### AUR package alternatives
+
+Generated binary recipes declare `provides=("myapp=${pkgver}")` and
+`conflicts=('myapp')`, using `[project].id` as the base name. Set
+`[aur].package_name` when the canonical package name differs from that ID.
+The base package does not need to provide or conflict with itself.
+
+Project-owned `-git` PKGBUILDs must declare the same relationships, using
+double quotes around `myapp=${pkgver}` so makepkg expands the version. Yesb
+checks the evaluated `.SRCINFO` before committing or pushing an AUR recipe;
+missing or stale relationships fail with an instruction to update the source
+PKGBUILD. It does not rewrite project-owned declarations.
+
+Optional `[aur].provides` and `[aur].conflicts` arrays replace the defaults
+for both variants. `{version}` expands to the published version; empty arrays
+disable the respective requirement for intentional exceptions. For example:
+
+```toml
+[aur]
+package_name = "myapp"
+provides = ["myapp={version}", "other-interface"]
+conflicts = ["myapp", "old-app"]
+```
+
 ### AUR metadata helper
 
-By default, `release_aur.py` requires a local `makepkg`. Projects publishing
-from Ubuntu, Debian, or another non-Arch host can set
+By default, `release_aur.py` requires a local `makepkg`. Hosts without it can set
 `[aur].srcinfo_helper_image` to a Docker/OCI image pinned by a full SHA-256
 digest. Yesb then runs only `makepkg --printsrcinfo` in that image; cloning,
 Git commits, AUR pushes, and R2 uploads remain on the host.
@@ -192,12 +215,23 @@ full digest in each project's `release.toml`.
 
 APT and RPM publication keeps only the latest package version for the project
 being released. Shared packages from other projects remain available, while
-existing immutable package objects are skipped instead of reuploaded. Indexes
-and signatures are regenerated for every release. Publishing a version whose
+existing immutable package objects are skipped instead of reuploaded. RPM
+updates download only `repomd.xml` and its primary, filelists and other XML
+indexes. `createrepo_c` reuses their package metadata with an explicit package
+list and `--skip-stat`; unchanged RPM payloads remain in R2. Missing, corrupt
+or incomplete indexes fail before upload, rather than dropping shared packages.
+Indexes and signatures are regenerated for every release. Publishing a version whose
 package object already exists is rejected, and a permanent publication marker
 prevents republishing a retired version; bump the version to publish again.
+Versioned release artifacts are immutable; repository indexes, signatures and
+public keys may refresh, and repository lock objects coordinate publishers.
 
 ## Requirements
+
+The host need not run Ubuntu or Debian. Builds run in the project's Dockerfile
+through Buildx; its Linux base image and packaging tools are independent of the
+host distribution. Publisher scripts run on the host and check the required
+executables listed below. Docker alone does not supply host-side APT/RPM tools.
 
 - Python 3.11 or newer
 - Docker with Buildx configured for every requested platform; install

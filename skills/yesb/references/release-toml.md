@@ -166,6 +166,7 @@ ssh_user = "aur"                # default
 maintainer = "Your Name <you@example.com>"
 
 [aur]
+package_name = "myapp"           # canonical name; defaults to project.id
 git_pkgbuild = "packaging/PKGBUILD"
 git_package = "myapp-git"        # defaults to <project.id>-git
 binary_package = "myapp-bin"     # defaults to <project.id>-bin
@@ -174,6 +175,19 @@ depends = ["example-lib"]
 
 `public_base_url` is required for usable generated binary AUR download URLs.
 Binary AUR publishing expects both amd64 and arm64 release archives.
+
+Both variants default to providing the canonical package at the published
+version and conflicting with its unversioned name. A generated `myapp-bin`
+recipe uses `provides=("myapp=${pkgver}")` and `conflicts=('myapp')`.
+Project-owned `-git` recipes must declare these themselves; evaluated `.SRCINFO`
+is checked before Yesb commits or pushes. A package named exactly like the
+canonical package has no default self-provision or self-conflict.
+
+Optional `provides` and `conflicts` string arrays replace these defaults for
+both variants. `provides = ["myapp={version}"]` expands `{version}` to the
+published version; `conflicts = ["myapp", "old-app"]` can add another
+alternative. An empty array intentionally disables that requirement. Other
+shell expressions are not accepted in these manifest values.
 
 ## Homebrew
 

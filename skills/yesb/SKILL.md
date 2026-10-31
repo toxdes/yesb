@@ -81,6 +81,16 @@ resolve their Python dependency. AUR publishing needs `git` and `ssh`, plus
 either local `makepkg` or Docker when `[aur].srcinfo_helper_image` is
 configured.
 
+Buildx builds use the project's container image, independent of the host Linux
+distribution. Check host executables for publishing rather than assuming
+Ubuntu, Debian or Arch; APT/RPM repository tools still run on the host.
+
+Generated AUR binary recipes provide the canonical package at `${pkgver}` and
+conflict with its base name. Project-owned `-git` recipes must declare the same
+relationships with an expanded version. Yesb validates their evaluated
+`.SRCINFO` before committing or pushing. See the manifest reference for
+`[aur].package_name`, `provides` and `conflicts` overrides.
+
 APT and RPM repositories keep only the latest package version for the project
 being published. Shared repositories for other projects are preserved while
 their existing immutable package objects are reused rather than uploaded
@@ -92,6 +102,11 @@ before any repository changes are made. A permanent per-project, per-version
 publication marker also prevents republishing a version after its old package
 objects have been retired. To republish, bump the project version; there is
 intentionally no overwrite switch for immutable release artifacts.
+
+RPM publishing reads existing XML indexes and reuses metadata for unchanged
+packages without downloading their payloads. This relies on immutable RPM
+filenames. Missing or corrupt indexes fail before upload. Repository indexes,
+signatures and public keys may refresh; versioned release artifacts may not.
 
 ## Publish
 

@@ -1,11 +1,100 @@
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from release_aur import generate_srcinfo
-from release_lib import load_config, validate_config
+from release_aur import generate_srcinfo, push_aur, release_bin, release_git, validate_relationships
+from release_lib import ProjectConfig, aur_relationships, load_config, validate_config
+
+
+class AurRelationshipsTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.config = ProjectConfig({
+            "project": {"id": "example", "version_file": "VERSION"},
+            "aur": {"git_pkgbuild": "PKGBUILD"},
+        }, self.root / "release.toml")
+        (self.root / "VERSION").write_text("1.2.3\n")
+        self.required = {"provides": ["example=1.2.3"], "conflicts": ["example"]}
+
+    def test_defaults_overrides_and_canonical_name(self):
+        self.assertEqual(aur_relationships(self.config, "1.2.3", "example-bin"), self.required)
+        self.assertEqual(aur_relationships(self.config, "1.2.3", "example-git"), self.required)
+        self.assertEqual(aur_relationships(self.config, "1.2.3", "example"), {"provides": [], "conflicts": []})
+        self.config.data["aur"]["package_name"] = "other"
+        self.assertEqual(aur_relationships(self.config, "1.2.3", "example-bin"), {
+            "provides": ["other=1.2.3"], "conflicts": ["other"],
+        })
+        self.config.data["aur"].update(provides=["custom={version}", "interface"], conflicts=["custom<2.0"])
+        self.assertEqual(aur_relationships(self.config, "1.2.3", "example-bin"), {
+            "provides": ["custom=1.2.3", "interface"], "conflicts": ["custom<2.0"],
+        })
+        self.config.data["aur"].update(provides=[], conflicts=[])
+        self.assertEqual(aur_relationships(self.config, "1.2.3", "example-bin"), {"provides": [], "conflicts": []})
+
+    def test_invalid_overrides_fail_manifest_validation(self):
+        for key, value in (
+            ("provides", "example"), ("provides", ["example>{version}"]),
+            ("provides", ["example=$(uname)"]), ("provides", ["example={unknown}"]),
+            ("conflicts", ["example-bin"]), ("conflicts", ["example\nother"]),
+        ):
+            with self.subTest(key=key, value=value):
+                self.config.data["aur"] = {key: value}
+                with self.assertRaises(SystemExit):
+                    validate_config(self.config, "aur")
+
+    def test_binary_recipe_expands_version_and_conflicts(self):
+        archives = {arch: (self.root / f"example_1.2.3_{arch}.tar.gz", "a" * 64) for arch in ("x86_64", "aarch64")}
+        with patch("release_aur.push_aur") as push:
+            release_bin(self.config, "1.2.3", archives, aur_host="aur.archlinux.org", aur_user="aur", maintainer="maintainer")
+        text = push.call_args.args[1]
+        self.assertEqual(push.call_args.kwargs["relationships"], self.required)
+        recipe = self.root / "PKGBUILD"
+        recipe.write_text(text)
+        result = subprocess.run([
+            "bash", "-c", 'source "$1"; printf "%s\\n" "${provides[@]}" "${conflicts[@]}"',
+            "bash", str(recipe),
+        ], check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout.splitlines(), ["example=1.2.3", "example"])
+        if shutil.which("makepkg"):
+            validate_relationships(generate_srcinfo(self.root), "example-bin", self.required)
+
+    def test_git_recipe_is_preserved_and_relationships_are_required(self):
+        original = 'pkgname=example-git\npkgver=0.1\nprovides=("example=${pkgver}")\nconflicts=(example)\n'
+        (self.root / "PKGBUILD").write_text(original)
+        with patch("release_aur.push_aur") as push:
+            release_git(self.config, "1.2.3", aur_host="aur.archlinux.org", aur_user="aur", maintainer="maintainer")
+        self.assertEqual((self.root / "PKGBUILD").read_text(), original)
+        self.assertEqual(push.call_args.args[0], "example-git")
+        self.assertIn("pkgver=1.2.3", push.call_args.args[1])
+        self.assertEqual(push.call_args.kwargs["relationships"], self.required)
+
+    def test_srcinfo_inheritance_and_package_overrides(self):
+        base = "pkgbase = example-git\nprovides = example=1.2.3\nconflicts = example\n"
+        validate_relationships(base + "pkgname = example-git\n", "example-git", self.required)
+        for fields in (
+            "provides = example\n", "provides = example=0.1\n", "conflicts =\n",
+            "provides = example=1.2.3\nconflicts = example-git\n",
+        ):
+            with self.subTest(fields=fields), self.assertRaises(RuntimeError):
+                validate_relationships(base + "pkgname = example-git\n" + fields, "example-git", self.required)
+        with self.assertRaises(RuntimeError):
+            validate_relationships(base + "pkgname = other\n", "example-git", self.required)
+
+    def test_missing_git_relationships_stop_before_commit_or_push(self):
+        srcinfo = "pkgbase = example-git\npkgver = 1.2.3\npkgname = example-git\n"
+        with (
+            patch("release_aur.clone_or_pull", return_value=self.root),
+            patch("release_aur.generate_srcinfo", return_value=srcinfo),
+            patch("release_aur.run") as run,
+            self.assertRaisesRegex(RuntimeError, "missing provides"),
+        ):
+            push_aur("example-git", "pkgver=1.2.3\n", aur_host="aur.archlinux.org", aur_user="aur", maintainer="maintainer", version="1.2.3", relationships=self.required)
+        run.assert_not_called()
 
 
 class SrcinfoHelperTests(unittest.TestCase):

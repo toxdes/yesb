@@ -21,12 +21,14 @@ Environment:
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 from release_lib import (
+    aur_relationships,
     check_tools,
     compute_hashes,
     load_config,
@@ -51,6 +53,8 @@ arch=('x86_64' 'aarch64')
 url="{url}"
 license=('{license}')
 depends=({depends})
+provides=({provides})
+conflicts=({conflicts})
 
 source_x86_64=("{project_id}-${{pkgver}}-x86_64.tar.gz::{release_url}/{project_id}_${{pkgver}}_amd64.tar.gz")
 sha256sums_x86_64=('{sha256_amd64}')
@@ -129,6 +133,35 @@ def clone_or_pull(repo_name, workdir, aur_host, aur_user):
     return repo_path
 
 
+def validate_relationships(srcinfo, package_name, required):
+    """Check makepkg's evaluated metadata, including per-package overrides."""
+    base = {key: [] for key in required}
+    packages = {}
+    section = base
+    for line in srcinfo.splitlines():
+        key, separator, value = line.strip().partition("=")
+        if not separator or key.lstrip().startswith("#"):
+            continue
+        key, value = key.strip(), value.strip()
+        if key == "pkgname":
+            section = packages.setdefault(value, {})
+        elif key in required:
+            section.setdefault(key, []).append(value)
+    if package_name not in packages:
+        raise RuntimeError(f"AUR metadata does not declare package {package_name}")
+    for key, expected in required.items():
+        actual = packages[package_name].get(key, base[key])
+        for value in actual:
+            if re.split(r"[<>=]", value, maxsplit=1)[0] == package_name:
+                raise RuntimeError(f"AUR {package_name}: {key} must not name the package itself")
+        missing = set(expected) - set(actual)
+        if missing:
+            raise RuntimeError(
+                f"AUR {package_name}: PKGBUILD is missing {key}: {', '.join(sorted(missing))}; "
+                "update the project-owned PKGBUILD"
+            )
+
+
 def push_aur(
     repo_name,
     pkgbuild_text,
@@ -138,6 +171,7 @@ def push_aur(
     maintainer,
     version,
     srcinfo_helper_image=None,
+    relationships=None,
 ):
     with tempfile.TemporaryDirectory(prefix="aur-") as tmp:
         workdir = Path(tmp)
@@ -153,6 +187,8 @@ def push_aur(
         pkgbuild_text = pkgbuild_text.rstrip("\n") + "\n"
         (repo / "PKGBUILD").write_text(pkgbuild_text)
         srcinfo = generate_srcinfo(repo, srcinfo_helper_image)
+        if relationships is not None:
+            validate_relationships(srcinfo, repo_name, relationships)
 
         if (
             old_pkg.rstrip() == pkgbuild_text.rstrip()
@@ -237,6 +273,7 @@ def release_git(
     if replacements != 1:
         raise RuntimeError(f"{template_path} must contain one static pkgver assignment")
     package_name = aur.get("git_package", f"{config.project['id']}-git")
+    relationships = aur_relationships(config, version, package_name)
     push_aur(
         package_name,
         pkgbuild,
@@ -245,6 +282,7 @@ def release_git(
         maintainer=maintainer,
         version=version,
         srcinfo_helper_image=srcinfo_helper_image,
+        relationships=relationships,
     )
     print(f"  -> AUR: {package_name} updated")
 
@@ -271,6 +309,14 @@ def release_bin(
     description = project.get("description", project.get("name", project_id))
     depends = " ".join(f"'{dependency}'" for dependency in aur.get("depends", []))
     checksums = {arch: checksum for arch, (_path, checksum) in archives.items()}
+    relationships = aur_relationships(config, version, package_name)
+    arrays = {
+        key: " ".join(shlex.quote(value) for value in values)
+        for key, values in relationships.items()
+    }
+    base = aur.get("package_name", project_id)
+    if "provides" not in aur and package_name != base:
+        arrays["provides"] = f'"{base}=${{pkgver}}"'
 
     pkgbuild = BIN_PKGBUILD_TEMPLATE.format(
         maintainer=maintainer,
@@ -282,6 +328,7 @@ def release_bin(
         project_id=project_id,
         release_url=release_url,
         depends=depends,
+        **arrays,
         sha256_amd64=checksums["x86_64"],
         sha256_arm64=checksums["aarch64"],
     )
@@ -293,6 +340,7 @@ def release_bin(
         maintainer=maintainer,
         version=version,
         srcinfo_helper_image=srcinfo_helper_image,
+        relationships=relationships,
     )
     print(f"  -> AUR: {package_name} updated")
 

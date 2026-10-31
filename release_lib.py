@@ -211,6 +211,11 @@ def validate_config(config, operation):
                 kind="file",
             )
         _validate_string_list(config.section("aur"), "depends", "[aur]")
+        for kind, suffix in (("binary", "bin"), ("git", "git")):
+            package_name = config.section("aur").get(
+                f"{kind}_package", f"{project['id']}-{suffix}"
+            )
+            aur_relationships(config, project_version(config), package_name)
         helper_image = config.section("aur").get("srcinfo_helper_image")
         if helper_image is not None and (
             not isinstance(helper_image, str)
@@ -514,6 +519,32 @@ def _validate_docker(config):
         for key, value in args.items()
     ):
         _config_error("[docker].args must contain scalar values")
+
+
+def aur_relationships(config, version, package_name):
+    """Resolve AUR alternatives without declaring a package against itself."""
+    aur = config.section("aur")
+    base = aur.get("package_name", config.project["id"])
+    defaults = {
+        "provides": [f"{base}={{version}}"] if package_name != base else [],
+        "conflicts": [base] if package_name != base else [],
+    }
+    relationships = {}
+    for key, default in defaults.items():
+        _validate_string_list(aur, key, "[aur]")
+        values = []
+        operator = "=" if key == "provides" else "(?:>=|<=|=|>|<)"
+        pattern = rf"([A-Za-z0-9@_+][A-Za-z0-9@_+.-]*)(?:{operator}[A-Za-z0-9+_.:~\-]+)?"
+        for template in aur.get(key, default):
+            value = template.replace("{version}", version)
+            match = re.fullmatch(pattern, value)
+            if not match:
+                _config_error(f"[aur].{key} contains an invalid package relation: {template!r}")
+            if match.group(1) == package_name:
+                _config_error(f"[aur].{key} must not refer to the package itself: {package_name}")
+            values.append(value)
+        relationships[key] = values
+    return relationships
 
 
 def _validate_string_list(section, key, label):
