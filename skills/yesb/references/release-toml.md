@@ -167,6 +167,7 @@ maintainer = "Your Name <you@example.com>"
 
 [aur]
 package_name = "myapp"           # canonical name; defaults to project.id
+source_pkgbuild = "packaging/PKGBUILD.source" # optional tagged stable source recipe
 git_pkgbuild = "packaging/PKGBUILD"
 git_package = "myapp-git"        # defaults to <project.id>-git
 binary_package = "myapp-bin"     # defaults to <project.id>-bin
@@ -175,12 +176,14 @@ depends = ["example-lib"]
 
 `public_base_url` is required for usable generated binary AUR download URLs.
 Binary AUR publishing expects both amd64 and arm64 release archives.
-Recommend installing `myapp-bin` for normal use and `myapp-git` for development
-source builds. Keep the `-bin` suffix for prebuilt open-source software;
-`package_name` identifies the canonical dependency name, not an installation
-alias or an AUR helper's default selection.
+Use `myapp` for tagged stable source builds, `myapp-bin` for the prebuilt
+release, and `myapp-git` for development source. `source_pkgbuild` is optional;
+its project-owned recipe must pin the release tag, use the canonical package
+name and omit `pkgver()`. Yesb updates its static version before publishing.
+`--type source` needs no binary archives or R2 credentials. The default `all`
+publishes every configured variant; legacy `both` still means `git` plus `bin`.
 
-Both variants default to providing the canonical package at the published
+The `-bin` and `-git` variants default to providing the canonical package at the published
 version and conflicting with its unversioned name. A generated `myapp-bin`
 recipe uses `provides=("myapp=${pkgver}")` and `conflicts=('myapp')`.
 Project-owned `-git` recipes must declare these themselves; evaluated `.SRCINFO`

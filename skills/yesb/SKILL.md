@@ -85,10 +85,13 @@ Buildx builds use the project's container image, independent of the host Linux
 distribution. Check host executables for publishing rather than assuming
 Ubuntu, Debian or Arch; APT/RPM repository tools still run on the host.
 
-Recommend `yay -S myapp-bin` as the normal AUR installation command. Keep
-`-git` as the source-build alternative and preserve the `-bin` suffix for
-prebuilt open-source software. AUR `provides` does not make an unsuffixed
-install request select that variant.
+Use `yay -S myapp` for source builds of the tagged stable release, `myapp-bin`
+for prebuilts, and `myapp-git` for development source. Configure a project-owned
+`[aur].source_pkgbuild` with a fixed release tag and no `pkgver()` function.
+The stable recipe uses the canonical name and has no self-provides/conflicts.
+Keep `-bin` for prebuilt open-source packages. `--type source` publishes only
+the stable recipe; `--type all` (default) includes all three configured variants.
+Legacy `--type both` continues to publish only `git` and `bin`.
 
 Generated AUR binary recipes provide the canonical package at `${pkgver}` and
 conflict with its base name. Project-owned `-git` recipes must declare the same
@@ -122,7 +125,7 @@ then run only the requested publisher:
 ```sh
 ./yesb/release_apt.py --env PATH
 ./yesb/release_rpm.py --env PATH
-./yesb/release_aur.py --env PATH --type git|bin|both
+./yesb/release_aur.py --env PATH --type source|git|bin|both|all
 ./yesb/release_direct.py --env PATH
 ./yesb/release_homebrew.py --env PATH
 ./yesb/release_docker.py --env PATH

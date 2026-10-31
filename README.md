@@ -177,17 +177,25 @@ The publishing scripts also accept `--env PATH` for `KEY=VALUE` files.
 
 ### AUR package alternatives
 
-Recommend the prebuilt `myapp-bin` package for normal installations:
+Use the unsuffixed package for source builds of a tagged stable release:
 
 ```sh
-yay -S myapp-bin
+yay -S myapp
 ```
 
-Keep the `-bin` suffix when source is available, as required by the
+Offer `myapp-bin` for the prebuilt release and `myapp-git` for the latest
+development source. Keep these distinct, following the
 [AUR submission guidelines](https://wiki.archlinux.org/title/AUR_submission_guidelines).
-Offer `myapp-git` separately for users who want to build the development
-version from source. `provides` satisfies dependencies on `myapp`; it does not
-make an unsuffixed `yay -S myapp` request select the binary variant.
+`provides` satisfies dependencies; it does not redirect explicit install commands.
+
+Set `[aur].source_pkgbuild` to a project-owned stable recipe. It must pin the
+release tag (for example `#tag=v${pkgver}`), omit a moving `pkgver()` function,
+and use the canonical `[aur].package_name` (default: project ID). Yesb updates
+the static `pkgver` for each release without rewriting the recipe's build steps.
+Publish it with `--type source`; `--type all` (the default) publishes all
+configured source variants and the binary package. Existing `--type both`
+continues to mean `git` plus `bin`. Source-only publishing needs no R2 credentials
+or built binary archives. Projects without `source_pkgbuild` skip that variant.
 
 Generated binary recipes declare `provides=("myapp=${pkgver}")` and
 `conflicts=('myapp')`, using `[project].id` as the base name. Set

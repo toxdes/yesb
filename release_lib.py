@@ -203,13 +203,10 @@ def validate_config(config, operation):
             config.section("aur"), project["id"], "[aur]", optional=True
         )
         project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
-        if config.section("aur").get("git_pkgbuild"):
-            project_path(
-                config,
-                config.section("aur")["git_pkgbuild"],
-                "[aur].git_pkgbuild",
-                kind="file",
-            )
+        for kind in ("source", "git"):
+            key = f"{kind}_pkgbuild"
+            if config.section("aur").get(key):
+                project_path(config, config.section("aur")[key], f"[aur].{key}", kind="file")
         _validate_string_list(config.section("aur"), "depends", "[aur]")
         for kind, suffix in (("binary", "bin"), ("git", "git")):
             package_name = config.section("aur").get(

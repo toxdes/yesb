@@ -7,9 +7,10 @@
 """Push to AUR and upload release archives to Cloudflare R2.
 
 Usage:
+    ./release_aur.py --type source  # tagged stable source release
     ./release_aur.py --type git     # initial submit, then only on dep changes
     ./release_aur.py --type bin     # every release (uploads .tar.gz + pushes PKGBUILD)
-    ./release_aur.py --type both
+    ./release_aur.py --type all     # source, git, and bin (default)
 
 Environment:
     AWS_ACCESS_KEY_ID         Cloudflare R2 access key
@@ -246,9 +247,10 @@ def upload_releases(config, archives):
         upload_file(tarball, key)
 
 
-def release_git(
+def _release_recipe(
     config,
     version,
+    kind,
     *,
     aur_host,
     aur_user,
@@ -256,13 +258,19 @@ def release_git(
     srcinfo_helper_image=None,
 ):
     aur = config.section("aur")
-    template = aur.get("git_pkgbuild")
+    key = f"{kind}_pkgbuild"
+    template = aur.get(key)
     if not template:
-        print("No [aur].git_pkgbuild configured; skipping git package")
+        print(f"No [aur].{key} configured; skipping {kind} package")
         return
 
-    template_path = project_path(config, template, "[aur].git_pkgbuild", kind="file")
+    template_path = project_path(config, template, f"[aur].{key}", kind="file")
     pkgbuild = template_path.read_text()
+    if kind == "source" and re.search(
+        r"^\s*(?:function\s+)?pkgver\s*(?:\(\s*\))?\s*\{",
+        pkgbuild, re.MULTILINE,
+    ):
+        raise RuntimeError(f"{template_path}: stable source recipes must not define pkgver()")
     pkgbuild, replacements = re.subn(
         r"^\s*pkgver\s*=.*$",
         f"pkgver={version}",
@@ -272,7 +280,11 @@ def release_git(
     )
     if replacements != 1:
         raise RuntimeError(f"{template_path} must contain one static pkgver assignment")
-    package_name = aur.get("git_package", f"{config.project['id']}-git")
+    package_name = (
+        aur.get("package_name", config.project["id"])
+        if kind == "source"
+        else aur.get("git_package", f"{config.project['id']}-git")
+    )
     relationships = aur_relationships(config, version, package_name)
     push_aur(
         package_name,
@@ -285,6 +297,14 @@ def release_git(
         relationships=relationships,
     )
     print(f"  -> AUR: {package_name} updated")
+
+
+def release_git(config, version, **kwargs):
+    return _release_recipe(config, version, "git", **kwargs)
+
+
+def release_source(config, version, **kwargs):
+    return _release_recipe(config, version, "source", **kwargs)
 
 
 def release_bin(
@@ -355,9 +375,9 @@ def main():
     )
     parser.add_argument(
         "--type",
-        choices=["git", "bin", "both"],
-        default="both",
-        help="Package type to release (default: both)",
+        choices=["source", "git", "bin", "both", "all"],
+        default="all",
+        help="Package type to release (default: all; both means git and bin)",
     )
     args = parser.parse_args()
 
@@ -381,7 +401,13 @@ def main():
         print("Error: an AUR maintainer identity is required", file=sys.stderr)
         return 1
 
-    if args.type in ("git", "both"):
+    if args.type in ("source", "all"):
+        release_source(
+            config, version, aur_host=aur_host, aur_user=aur_user,
+            maintainer=maintainer, srcinfo_helper_image=srcinfo_helper_image,
+        )
+
+    if args.type in ("git", "both", "all"):
         release_git(
             config,
             version,
@@ -391,7 +417,7 @@ def main():
             srcinfo_helper_image=srcinfo_helper_image,
         )
 
-    if args.type in ("bin", "both"):
+    if args.type in ("bin", "both", "all"):
         public_base_url = hosting.get("public_base_url", "")
         if not isinstance(public_base_url, str) or not public_base_url.startswith(
             "https://"

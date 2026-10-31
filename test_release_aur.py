@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from release_aur import generate_srcinfo, push_aur, release_bin, release_git, validate_relationships
+from release_aur import generate_srcinfo, main, push_aur, release_bin, release_git, release_source, validate_relationships
 from release_lib import ProjectConfig, aur_relationships, load_config, validate_config
 
 
@@ -72,6 +72,52 @@ class AurRelationshipsTests(unittest.TestCase):
         self.assertEqual(push.call_args.args[0], "example-git")
         self.assertIn("pkgver=1.2.3", push.call_args.args[1])
         self.assertEqual(push.call_args.kwargs["relationships"], self.required)
+
+    def test_stable_source_recipe_pins_tag_and_has_no_self_relationships(self):
+        self.config.data["aur"]["source_pkgbuild"] = "PKGBUILD.source"
+        original = 'pkgname=example\npkgver=0.1\npkgrel=1\narch=(x86_64)\nsource=("git+https://example.com/example.git#tag=v${pkgver}")\nsha256sums=(SKIP)\n'
+        (self.root / "PKGBUILD.source").write_text(original)
+        with patch("release_aur.push_aur") as push:
+            release_source(self.config, "1.2.3", aur_host="aur.archlinux.org", aur_user="aur", maintainer="maintainer")
+        self.assertEqual((self.root / "PKGBUILD.source").read_text(), original)
+        self.assertEqual(push.call_args.args[0], "example")
+        self.assertEqual(push.call_args.kwargs["relationships"], {"provides": [], "conflicts": []})
+        (self.root / "PKGBUILD").write_text(push.call_args.args[1])
+        result = subprocess.run(["bash", "-c", 'source "$1"; printf "%s\\n" "${source[@]}"', "bash", str(self.root / "PKGBUILD")], check=True, capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), "git+https://example.com/example.git#tag=v1.2.3")
+        if shutil.which("makepkg"):
+            validate_relationships(generate_srcinfo(self.root), "example", push.call_args.kwargs["relationships"])
+
+    def test_stable_source_rejects_moving_version_function(self):
+        self.config.data["aur"]["source_pkgbuild"] = "PKGBUILD.source"
+        (self.root / "PKGBUILD.source").write_text("pkgver=1.2.3\npkgver() { echo moving; }\n")
+        with patch("release_aur.push_aur") as push, self.assertRaisesRegex(RuntimeError, "must not define pkgver"):
+            release_source(self.config, "1.2.3", aur_host="aur.archlinux.org", aur_user="aur", maintainer="maintainer")
+        push.assert_not_called()
+
+    def test_missing_source_template_fails_validation(self):
+        self.config.data["aur"]["source_pkgbuild"] = "missing"
+        with self.assertRaises(SystemExit):
+            validate_config(self.config, "aur")
+
+    def test_source_only_cli_does_not_upload_or_publish_other_variants(self):
+        self.config.data["project"]["maintainer"] = "Maintainer <maintainer@example.com>"
+        self.config.data["aur"] = {"source_pkgbuild": "PKGBUILD.source"}
+        (self.root / "PKGBUILD.source").write_text("pkgname=example\npkgver=1.2.3\n")
+        with (
+            patch("sys.argv", ["release_aur.py", "--type", "source"]),
+            patch("release_aur.load_config", return_value=self.config),
+            patch("release_aur.check_tools"),
+            patch("release_aur.release_source") as source,
+            patch("release_aur.release_git") as git,
+            patch("release_aur.release_archives") as archives,
+            patch("release_aur.upload_releases") as upload,
+            patch("release_aur.release_bin") as binary,
+        ):
+            main()
+        source.assert_called_once()
+        for other in (git, archives, upload, binary):
+            other.assert_not_called()
 
     def test_srcinfo_inheritance_and_package_overrides(self):
         base = "pkgbase = example-git\nprovides = example=1.2.3\nconflicts = example\n"
