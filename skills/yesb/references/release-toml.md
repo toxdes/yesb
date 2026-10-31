@@ -230,3 +230,24 @@ does not upload files or require R2 credentials. Optional `[[homebrew.assets]]`
 entries install additional archive contents with standard Homebrew methods,
 such as `man1`, `share`, and `include`; `binary` remains the shorthand for the
 required executable installed into `bin`.
+
+## Publisher helper images
+
+```toml
+[deb]
+helper_image = "docker.io/yourorg/yesb-apt-helper@sha256:<64 lowercase hex digits>"
+
+[rpm]
+helper_image = "docker.io/yourorg/yesb-rpm-helper@sha256:<64 lowercase hex digits>"
+
+[aur]
+srcinfo_helper_image = "docker.io/yourorg/yesb-aur-helper@sha256:<64 lowercase hex digits>"
+```
+
+Each setting is required only for its publisher operation. Images must be pinned
+by digest; mutable tags are rejected. Build, direct, Homebrew and Docker-image
+operations do not require these settings. Updating an existing manifest requires
+adding the corresponding helper reference; there is no host-packaging-tool
+fallback. Helpers run natively and consume finished packages, with host GPG used
+for signing. Credentials belong in the host environment or --env file, never in
+these image references or image build arguments. Project builds remain unchanged.

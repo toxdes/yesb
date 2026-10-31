@@ -20,13 +20,14 @@ Environment:
 """
 
 import argparse
-import os
 import re
 import shlex
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from container_tools import bind_mount, host_identity
 
 from release_lib import (
     aur_relationships,
@@ -70,54 +71,47 @@ package() {{
 
 
 def generate_srcinfo(repo, helper_image=None):
-    """Generate AUR metadata locally or in an isolated helper image."""
+    """Generate AUR metadata in its pinned Arch helper."""
     if helper_image is None:
-        command = ["makepkg", "--printsrcinfo"]
-        result = subprocess.run(
-            command,
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            check=True,
+        raise RuntimeError("Configure [aur].srcinfo_helper_image; host makepkg is not used")
+    uid, gid = host_identity()
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--user",
+        f"{uid}:{gid}",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+        "--tmpfs",
+        f"/work:rw,noexec,nosuid,size=64m,uid={uid},gid={gid}",
+        "--mount",
+        bind_mount(repo, "/input", True),
+        "--workdir",
+        "/work",
+        "--env",
+        "HOME=/tmp",
+        helper_image,
+        "sh",
+        "-c",
+        "cp -- /input/PKGBUILD /work/PKGBUILD && makepkg --printsrcinfo",
+    ]
+    print("  $ " + " ".join(str(part) for part in command))
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        detail = result.stderr.strip() or "no diagnostic output"
+        raise RuntimeError(
+            f"AUR srcinfo helper failed ({helper_image}): {detail}"
         )
-    else:
-        command = [
-            "docker",
-            "run",
-            "--rm",
-            "--network=none",
-            "--read-only",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--user",
-            f"{os.getuid()}:{os.getgid()}",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=64m",
-            "--tmpfs",
-            f"/work:rw,noexec,nosuid,size=64m,uid={os.getuid()},gid={os.getgid()}",
-            "--mount",
-            f"type=bind,src={repo},dst=/input,readonly",
-            "--workdir",
-            "/work",
-            "--env",
-            "HOME=/tmp",
-            helper_image,
-            "sh",
-            "-c",
-            "cp -- /input/PKGBUILD /work/PKGBUILD && makepkg --printsrcinfo",
-        ]
-        print("  $ " + " ".join(str(part) for part in command))
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode:
-            detail = result.stderr.strip() or "no diagnostic output"
-            raise RuntimeError(
-                f"AUR srcinfo helper failed ({helper_image}): {detail}"
-            )
     if not result.stdout.strip():
         raise RuntimeError("makepkg produced an empty .SRCINFO")
     return result.stdout.rstrip("\n") + "\n"
@@ -388,9 +382,7 @@ def main():
     validate_config(config, "aur")
     aur = config.section("aur")
     srcinfo_helper_image = aur.get("srcinfo_helper_image")
-    required_tools = ["git", "ssh"]
-    required_tools.append("docker" if srcinfo_helper_image else "makepkg")
-    check_tools(*required_tools)
+    check_tools("git", "ssh", "docker")
     version = project_version(config)
     hosting = config.section("hosting")
     aur_hosting = hosting.get("aur", {})

@@ -61,7 +61,8 @@ class AurRelationshipsTests(unittest.TestCase):
         ], check=True, capture_output=True, text=True)
         self.assertEqual(result.stdout.splitlines(), ["example=1.2.3", "example"])
         if shutil.which("makepkg"):
-            validate_relationships(generate_srcinfo(self.root), "example-bin", self.required)
+            result = subprocess.run(["makepkg", "--printsrcinfo"], cwd=self.root, check=True, capture_output=True, text=True)
+            validate_relationships(result.stdout, "example-bin", self.required)
 
     def test_git_recipe_is_preserved_and_relationships_are_required(self):
         original = 'pkgname=example-git\npkgver=0.1\nprovides=("example=${pkgver}")\nconflicts=(example)\n'
@@ -86,7 +87,8 @@ class AurRelationshipsTests(unittest.TestCase):
         result = subprocess.run(["bash", "-c", 'source "$1"; printf "%s\\n" "${source[@]}"', "bash", str(self.root / "PKGBUILD")], check=True, capture_output=True, text=True)
         self.assertEqual(result.stdout.strip(), "git+https://example.com/example.git#tag=v1.2.3")
         if shutil.which("makepkg"):
-            validate_relationships(generate_srcinfo(self.root), "example", push.call_args.kwargs["relationships"])
+            result = subprocess.run(["makepkg", "--printsrcinfo"], cwd=self.root, check=True, capture_output=True, text=True)
+            validate_relationships(result.stdout, "example", push.call_args.kwargs["relationships"])
 
     def test_stable_source_rejects_moving_version_function(self):
         self.config.data["aur"]["source_pkgbuild"] = "PKGBUILD.source"
@@ -102,7 +104,10 @@ class AurRelationshipsTests(unittest.TestCase):
 
     def test_source_only_cli_does_not_upload_or_publish_other_variants(self):
         self.config.data["project"]["maintainer"] = "Maintainer <maintainer@example.com>"
-        self.config.data["aur"] = {"source_pkgbuild": "PKGBUILD.source"}
+        self.config.data["aur"] = {
+            "source_pkgbuild": "PKGBUILD.source",
+            "srcinfo_helper_image": "example/aur-helper@sha256:" + "a" * 64,
+        }
         (self.root / "PKGBUILD.source").write_text("pkgname=example\npkgver=1.2.3\n")
         with (
             patch("sys.argv", ["release_aur.py", "--type", "source"]),

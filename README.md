@@ -44,10 +44,12 @@ platforms = ["linux/amd64", "linux/arm64"]
 publish_latest = false
 
 [deb]
+helper_image = "docker.io/yourorg/yesb-apt-helper@sha256:<64 lowercase hex digits>"
 package_name = "myapp"
 architectures = ["amd64", "arm64"]
 
 [rpm]
+helper_image = "docker.io/yourorg/yesb-rpm-helper@sha256:<64 lowercase hex digits>"
 package_name = "myapp"
 
 [release]
@@ -58,7 +60,7 @@ platform = "windows"                    # optional metadata
 architecture = "x86_64"                 # optional metadata
 
 [aur]
-# srcinfo_helper_image = "docker.io/toxdes/yesb-aur-helper@sha256:<64 lowercase hex digits>"
+srcinfo_helper_image = "docker.io/toxdes/yesb-aur-helper@sha256:<64 lowercase hex digits>"
 
 [hosting]
 public_base_url = "https://packages.example.com"
@@ -219,11 +221,63 @@ provides = ["myapp={version}", "other-interface"]
 conflicts = ["myapp", "old-app"]
 ```
 
+### APT and RPM helpers
+
+Configure `[deb].helper_image` and `[rpm].helper_image` with published image
+references pinned by SHA-256 digest. APT runs only its Debian helper; RPM runs
+only its Fedora helper. Builds, direct uploads, Homebrew and Docker-image
+publication do not require these settings. Existing manifests must add the
+corresponding image reference before using these publishers; host-tool fallback
+is not used. No helper images are published automatically.
+
+Build the runtime images locally from the Yesb directory:
+
+```sh
+docker buildx build --load -f apt-helper.Dockerfile -t yesb-apt-helper:local .
+docker buildx build --load -f rpm-helper.Dockerfile -t yesb-rpm-helper:local .
+```
+
+The Dockerfiles pin their official Debian/Fedora bases. They include only runtime
+code and tools; tests and project files are excluded. Maintainers publish AMD64
+and ARM64 variants under one multi-platform image, then consumers record the
+manifest digest. Updating a digest is an explicit tooling upgrade. Projects may
+optionally use these images for their own packaging commands with an overridden
+entrypoint; `build_all.py` and the project's Dockerfile contract are unchanged.
+
+Helpers run on the Docker host's native architecture, not the package target's.
+An AMD64 helper can prepare indexes for ARM64 packages. Each invocation mounts
+only staged packages/metadata read-only and a temporary output directory writable.
+It uses the caller's UID/GID, a read-only root filesystem, dropped capabilities,
+no network, no agent mounts, and no publishing credentials. The Docker daemon
+must have access to these local staging paths. Linux has been integration-tested;
+Docker Desktop hosts require validation of file sharing and host GPG/pinentry.
+
+`GPG_KEY_ID` selects an existing host private key. `GPG_PASSPHRASE`, when supplied,
+is sent to host GPG through stdin; otherwise normal agent/pinentry behavior applies.
+APT's Release and RPM's repomd.xml are signed and verified on the host. RPM package
+signing runs `rpmsign` inside Fedora: its signing adapter relays bounded requests
+over a versioned stdin/stdout protocol to host GPG. An internal Unix socket joins
+the adapter to its container runner; no host socket or network service is exposed.
+Only the invocation's selected key can be used, with at most four detached
+signature requests per package and a 16 MiB limit on each request. Unknown protocol
+versions, missing output, failed signing, invalid package signatures, and helper
+timeouts stop publication. Cancellation stops the helper and discards staging.
+
+The host authorizes only the exact headers read from the selected RPM inputs.
+It independently checks that returned RPM headers and payloads are unchanged and
+verifies package signatures with the selected host key. The envelope reader
+accepts immutable RPM v4/v6 headers; unsupported layouts fail closed. APT payload
+bytes must match their inputs. Repository output is restricted to the selected
+packages and expected metadata, with checksum and final upload-manifest checks.
+Repository paths must be portable relative paths; APT suite and component each
+use one path component. Protocol reads and writes share a ten-minute deadline.
+Pinned images remain trusted build tools, not a replacement for reviewing package
+contents and repository metadata.
+
 ### AUR metadata helper
 
-By default, `release_aur.py` requires a local `makepkg`. Hosts without it can set
-`[aur].srcinfo_helper_image` to a Docker/OCI image pinned by a full SHA-256
-digest. Yesb then runs only `makepkg --printsrcinfo` in that image; cloning,
+`release_aur.py` requires `[aur].srcinfo_helper_image`, a Docker/OCI image
+pinned by a full SHA-256 digest. Yesb then runs only `makepkg --printsrcinfo` in that image; cloning,
 Git commits, AUR pushes, and R2 uploads remain on the host.
 
 The helper runs without network access, with a read-only checkout mount, a
@@ -250,17 +304,18 @@ public keys may refresh, and repository lock objects coordinate publishers.
 
 The host need not run Ubuntu or Debian. Builds run in the project's Dockerfile
 through Buildx; its Linux base image and packaging tools are independent of the
-host distribution. Publisher scripts run on the host and check the required
-executables listed below. Docker alone does not supply host-side APT/RPM tools.
+host distribution. Publisher orchestration runs on the host. Distro-specific repository tools run
+in the selected helper image; install no Debian, Fedora or Arch packaging tools
+on the host.
 
 - Python 3.11 or newer
 - Docker with Buildx configured for every requested platform; install
   QEMU/binfmt explicitly when the builder needs cross-platform emulation
 - `uv` for publisher script dependencies
-- APT publishing: `dpkg`, `dpkg-deb`, and `gpg`
-- RPM publishing: `createrepo_c`, `rpmsign`, and `gpg`
-- AUR publishing: `git`, `ssh`, and an authenticated AUR account; either local
-  `makepkg` or Docker when `[aur].srcinfo_helper_image` is configured
+- APT publishing: Docker and host `gpg` when signing
+- RPM publishing: Docker and host `gpg` when signing; RPM tools run in Fedora
+- AUR publishing: Docker, `git`, `ssh`, an authenticated AUR account, and host
+  signing tools if required by Git configuration
 - Homebrew publishing: `git` and credentials for the configured tap remote
 - Docker publishing: Docker with Buildx and credentials for the configured
   registry

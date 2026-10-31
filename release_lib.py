@@ -186,11 +186,13 @@ def validate_config(config, operation):
         _validate_hosting(config)
 
     elif operation == "apt":
+        publisher_helper_image(config, "deb")
         _validate_package_name(config.section("deb"), project["id"], "[deb]")
         _validate_deb_architectures(config.section("deb"))
         project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
         _validate_hosting(config)
     elif operation == "rpm":
+        publisher_helper_image(config, "rpm")
         _validate_package_name(config.section("rpm"), project["id"], "[rpm]")
         _validate_platforms(build)
         release = config.section("rpm").get("release", "1")
@@ -214,10 +216,7 @@ def validate_config(config, operation):
             )
             aur_relationships(config, project_version(config), package_name)
         helper_image = config.section("aur").get("srcinfo_helper_image")
-        if helper_image is not None and (
-            not isinstance(helper_image, str)
-            or not PINNED_IMAGE.fullmatch(helper_image)
-        ):
+        if not isinstance(helper_image, str) or not PINNED_IMAGE.fullmatch(helper_image):
             _config_error(
                 "[aur].srcinfo_helper_image must be a Docker image pinned by a sha256 digest"
             )
@@ -236,6 +235,17 @@ def validate_config(config, operation):
         raise ValueError(f"Unknown validation operation: {operation}")
 
     return version_file
+
+
+def publisher_helper_image(config, section):
+    """Resolve only the helper required by the requested publisher."""
+    image = config.section(section).get("helper_image")
+    if not isinstance(image, str) or not PINNED_IMAGE.fullmatch(image):
+        _config_error(
+            f"[{section}].helper_image must be a Docker image pinned by a sha256 digest; "
+            "configure the corresponding Yesb helper (see README.md)"
+        )
+    return image
 
 
 def _validate_package_name(section, default, label, optional=False):
@@ -552,6 +562,31 @@ def _validate_string_list(section, key, label):
         _config_error(f"{label}.{key} must be an array of non-empty strings")
 
 
+def safe_object_path(value):
+    """Require portable, nonempty object-key components without normalization."""
+    if not isinstance(value, str):
+        raise RuntimeError(f"Unsafe repository path: {value!r}")
+    for part in value.split("/"):
+        stem = part.split(".", 1)[0].upper()
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_~+.-]+", part)
+            or part in {".", ".."} or part.endswith(".")
+            or stem in {"CON", "PRN", "AUX", "NUL"}
+            or re.fullmatch(r"(?:COM|LPT)[1-9]", stem)
+        ):
+            raise RuntimeError(f"Unsafe repository path: {value!r}")
+    return value
+
+
+def confined_path(root, relative):
+    safe_object_path(relative)
+    root = Path(root).resolve()
+    path = root.joinpath(*relative.split("/"))
+    if not path.resolve().is_relative_to(root):
+        raise RuntimeError("Repository path escapes its staging directory")
+    return path
+
+
 def _validate_hosting(config):
     hosting = config.section("hosting")
     for name in ("apt", "aur", "signing"):
@@ -564,19 +599,30 @@ def _validate_hosting(config):
         ("rpm_prefix", "rpm"),
     ):
         value = hosting.get(key, default)
-        path = Path(value) if isinstance(value, str) else Path("..")
-        if (
-            not isinstance(value, str)
-            or not value.strip("/")
-            or value.startswith("/")
-            or ".." in path.parts
-        ):
+        try:
+            safe_object_path(value)
+        except RuntimeError:
             _config_error(f"[hosting].{key} must be a safe object prefix")
 
     apt = hosting.get("apt", {})
-    for key in ("suite", "component", "origin", "label"):
+    defaults = {
+        "suite": "stable", "component": "main", "origin": config.project["id"],
+        "label": config.project.get("name", config.project["id"]),
+    }
+    for key, default in defaults.items():
+        value = apt.get(key, default)
         if key in apt:
             _require_string(apt, key, "[hosting.apt]")
+        try:
+            if key in {"suite", "component"}:
+                safe_object_path(value)
+        except RuntimeError:
+            _config_error(f"[hosting.apt].{key} must be a single safe path component")
+        if isinstance(value, str):
+            if any(ord(char) < 32 or ord(char) == 127 for char in value):
+                _config_error(f"[hosting.apt].{key} must not contain control characters")
+            if key in {"suite", "component"} and not SAFE_IDENTIFIER.fullmatch(value):
+                _config_error(f"[hosting.apt].{key} must be a single safe path component")
 
     aur = hosting.get("aur", {})
     for key in ("host", "ssh_user", "maintainer"):
@@ -907,11 +953,22 @@ def acquire_r2_lock(key, *, max_age=1800):
     raise RuntimeError(f"Could not acquire R2 publish lock: {key}")
 
 
-def upload_tree(root_dir, *, order=None, extra_args=None, skip_existing=None):
+def upload_tree(root_dir, *, order=None, extra_args=None, skip_existing=None, allowed_keys=None):
     """Upload a repository tree, optionally skipping immutable existing keys."""
-    client, bucket = r2_client()
     root_dir = Path(root_dir)
     paths = [path for path in root_dir.rglob("*") if path.is_file()]
+    if allowed_keys is not None:
+        actual = set()
+        for path in root_dir.rglob("*"):
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise RuntimeError("Refusing to upload nonregular repository entries")
+            if path.is_file():
+                key = path.relative_to(root_dir).as_posix()
+                confined_path(root_dir, key)
+                actual.add(key)
+        if actual != set(allowed_keys):
+            raise RuntimeError("Repository upload differs from the approved publication manifest")
+    client, bucket = r2_client()
     if order:
         paths.sort(key=lambda path: (order(path.relative_to(root_dir)), str(path)))
     else:
@@ -919,7 +976,7 @@ def upload_tree(root_dir, *, order=None, extra_args=None, skip_existing=None):
     skip_existing = set(skip_existing or ())
     for path in paths:
         relative = path.relative_to(root_dir)
-        key = str(relative)
+        key = relative.as_posix()
         if key in skip_existing:
             print(f"  {key} (unchanged)")
             continue

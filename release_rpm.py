@@ -35,9 +35,13 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
+from container_tools import prepare_repository
+from signing import signer_from_env
+
 from release_lib import (
     acquire_r2_lock,
     check_tools,
+    confined_path,
     delete_keys,
     download_optional,
     load_config,
@@ -45,6 +49,7 @@ from release_lib import (
     list_prefix,
     project_path,
     project_version,
+    publisher_helper_image,
     reject_published_release,
     release_marker_key,
     upload_tree,
@@ -146,7 +151,7 @@ def find_rpms(dist, package_name, version, release, platforms):
     return rpms
 
 
-def build_repo(root_dir, rpms, prefix, package_name, *, existing_metadata=None, existing_package_keys=()):
+def build_repo(root_dir, rpms, prefix, package_name, *, existing_metadata=None, existing_package_keys=(), signer=None):
     rpm_dir = root_dir / prefix
     rpm_dir.mkdir(parents=True, exist_ok=True)
 
@@ -166,7 +171,9 @@ def build_repo(root_dir, rpms, prefix, package_name, *, existing_metadata=None, 
 
     gpg_key = os.environ.get("GPG_KEY_ID")
     if gpg_key:
-        sign_rpms(current_rpms, gpg_key)
+        if signer is None:
+            raise RuntimeError("RPM signing requires the container signing adapter")
+        signer(current_rpms, gpg_key)
 
     expected = retained_rpm_paths(prefix, existing_package_keys, package_name)
     expected.extend(rpm.name for rpm in rpms)
@@ -180,25 +187,8 @@ def build_repo(root_dir, rpms, prefix, package_name, *, existing_metadata=None, 
                 "--update", "--skip-stat", "--update-md-path", str(existing_metadata),
                 "--pkglist", str(pkglist),
             ])
-        subprocess.run([*command, str(rpm_dir)], check=True)
+        subprocess.run([*command, str(rpm_dir)], check=True, stdout=sys.stderr)
     validate_package_locations(rpm_dir, expected)
-
-
-def pre_cache_gpg_key(key_id, passphrase=None):
-    """Sign a dummy to load the key into gpg-agent so rpmsign never prompts."""
-    cmd = ["gpg", "--batch", "--yes", "--pinentry-mode", "loopback"]
-    sp_args = {}
-    if passphrase:
-        cmd += ["--passphrase-fd", "0"]
-        sp_args["input"] = passphrase.encode()
-    cmd += ["--sign", "--local-user", key_id, "-o", "/dev/null", "/dev/null"]
-    subprocess.run(cmd, check=True, **sp_args)
-
-
-def sign_rpms(rpms, key_id):
-    cmd = ["rpmsign", "--addsign", "--define", f"_gpg_name {key_id}"]
-    for rpm in sorted(rpms):
-        subprocess.run(cmd + [str(rpm)], check=True)
 
 
 def rpm_upload_order(relative):
@@ -314,11 +304,11 @@ def main():
     release = str(rpm.get("release", "1"))
     platforms = build.get("platforms", ["linux/amd64"])
 
-    check_tools("createrepo_c", "gpg", "rpmsign")
-
-    gpg_key = os.environ.get("GPG_KEY_ID")
-    if gpg_key and os.environ.get("GPG_PASSPHRASE"):
-        pre_cache_gpg_key(gpg_key, os.environ["GPG_PASSPHRASE"])
+    check_tools("docker")
+    if os.environ.get("GPG_KEY_ID"):
+        check_tools("gpg")
+    image = publisher_helper_image(config, "rpm")
+    signer = signer_from_env()
 
     rpms = find_rpms(dist, package_name, version, release, platforms)
     print(f"Found {len(rpms)} package(s):")
@@ -376,9 +366,10 @@ def main():
         print(f"Found {len(existing_package_keys)} existing RPM object(s); no payload downloads.")
 
     print(f"\nBuilding RPM repository in {repo} ...")
-    build_repo(
-        repo_path, rpms, prefix, package_name,
-        existing_metadata=existing_metadata, existing_package_keys=existing_package_keys,
+    manifest = prepare_repository(
+        "rpm", image, repo_path, rpms,
+        dict(prefix=prefix, package_name=package_name, existing_package_keys=existing_package_keys),
+        existing_metadata=existing_metadata, signer=signer,
     )
 
     if args.serve:
@@ -386,9 +377,11 @@ def main():
         return
 
     if gpg_key:
-        repomd = repo_path / prefix / "repodata" / "repomd.xml"
+        repomd = confined_path(repo_path, f"{prefix}/repodata/repomd.xml")
         gpg_sign_repomd(repomd, gpg_key, os.environ.get("GPG_PASSPHRASE"))
+        signer.verify(repomd.with_name("repomd.xml.asc"), repomd)
         export_pubkey(gpg_key, repo_path, prefix)
+        manifest |= {f"{prefix}/repodata/repomd.xml.asc", f"{prefix}/pubkey.gpg"}
     else:
         print("Note: GPG_KEY_ID not set, skipping signing.", file=sys.stderr)
 
@@ -402,6 +395,7 @@ def main():
             order=rpm_upload_order,
             extra_args=rpm_upload_headers,
             skip_existing=existing_package_keys,
+            allowed_keys=manifest,
         )
         stale_package_keys = sorted(
             key

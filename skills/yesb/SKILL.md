@@ -75,15 +75,16 @@ Build package repositories without publishing:
 ```
 
 Use `--serve` instead when the user wants to install-test a temporary local
-repository. APT validation needs `dpkg`, `dpkg-deb`, and `gpg`; RPM validation
-needs `createrepo_c`, `rpmsign`, and `gpg`. The publisher scripts use `uv` to
-resolve their Python dependency. AUR publishing needs `git` and `ssh`, plus
-either local `makepkg` or Docker when `[aur].srcinfo_helper_image` is
-configured.
+repository. APT and RPM validation need Docker plus host GPG when signing.
+Configure `[deb].helper_image` and `[rpm].helper_image` with published SHA-256-pinned
+Debian/Fedora helpers. AUR publishing needs Git/SSH and its pinned
+`[aur].srcinfo_helper_image`. The publisher scripts use uv for Python dependencies.
 
 Buildx builds use the project's container image, independent of the host Linux
 distribution. Check host executables for publishing rather than assuming
-Ubuntu, Debian or Arch; APT/RPM repository tools still run on the host.
+Ubuntu, Debian or Arch. APT/RPM repository tools run in their configured helpers;
+private GPG keys, pinentry, SSH and uploads remain on the host. RPM signing uses
+Yesb's per-run adapter; never export private keys or mount agents into helpers.
 
 Use `yay -S myapp` for source builds of the tagged stable release, `myapp-bin`
 for prebuilts, and `myapp-git` for development source. Configure a project-owned
@@ -146,7 +147,7 @@ publishing requires Git credentials for its configured tap remote but does not
 require R2 credentials. Production APT and RPM uploads refuse unsigned
 publication unless the user explicitly requests `--allow-unsigned`.
 
-For non-Arch hosts, configure `[aur].srcinfo_helper_image` with a full
+For AUR publication, configure `[aur].srcinfo_helper_image` with a full
 SHA-256-pinned helper image. Yesb delegates only `.SRCINFO` generation to that
 isolated image. The AUR checkout is mounted read-only at `/input`; Yesb copies
 `PKGBUILD` into a writable in-container tmpfs before invoking
@@ -162,3 +163,19 @@ normal release user so the helper receives that user's UID/GID.
 
 Cache operations require `CF_API_TOKEN` and `CF_ZONE_ID`. Setting TTLs also
 requires `CF_BROWSER_TTL` and `CF_EDGE_TTL`.
+
+## Repository helper images
+
+The project owns compilation and finished package creation. Do not introduce a
+Yesb-controlled build pipeline. Projects may optionally reuse Yesb helper images.
+Debian/Fedora helper Dockerfiles include pinned official bases and runtime code
+only. Build locally before publication; publishing helper images still requires
+explicit authorization. Publish AMD64/ARM64 variants and record the resulting
+manifest digests in release.toml. Existing project manifests must add their helper
+references; do not silently fall back to host dpkg/rpmsign/createrepo tools.
+
+Host signing accepts only headers from the selected RPM inputs. The host verifies
+returned package content and signatures, checks repository metadata and output
+manifests, and rejects unsafe paths before signing or uploading. Unsupported RPM
+header layouts fail closed. Never relax these checks to accommodate a helper.
+See the README's APT/RPM helper section for protocol limits and image maintenance.

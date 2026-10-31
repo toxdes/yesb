@@ -35,9 +35,13 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from container_tools import prepare_repository
+from signing import signer_from_env
+
 from release_lib import (
     acquire_r2_lock,
     check_tools,
+    confined_path,
     compute_hashes,
     delete_keys,
     download_optional,
@@ -46,6 +50,7 @@ from release_lib import (
     list_prefix,
     project_path,
     project_version,
+    publisher_helper_image,
     reject_published_release,
     release_marker_key,
     upload_tree,
@@ -363,7 +368,11 @@ def main():
     dist = project_path(config, build.get("output_dir", "dist"), "[build].output_dir")
     version = project_version(config)
 
-    check_tools("dpkg-deb", "dpkg", "gpg")
+    check_tools("docker")
+    if os.environ.get("GPG_KEY_ID"):
+        check_tools("gpg")
+    image = publisher_helper_image(config, "deb")
+    signer = signer_from_env()
 
     debs = find_debs(dist, package_name, version, archs)
     print(f"Found {len(debs)} package(s):")
@@ -422,17 +431,17 @@ def main():
             existing_dir,
         )
     print(f"\nBuilding apt repository in {repo} ...")
-    build_repo(
-        repo_path,
-        debs,
-        prefix=prefix,
-        component=component,
-        suite=suite,
-        archs=archs,
-        package_name=package_name,
-        origin=apt_hosting.get("origin", project["id"]),
-        label=apt_hosting.get("label", project.get("name", project["id"])),
-        existing_packages=existing,
+    manifest = prepare_repository(
+        "apt", image, repo_path, debs, dict(
+            prefix=prefix,
+            component=component,
+            suite=suite,
+            archs=archs,
+            package_name=package_name,
+            origin=apt_hosting.get("origin", project["id"]),
+            label=apt_hosting.get("label", project.get("name", project["id"])),
+            existing_packages=existing,
+        ),
     )
 
     if args.serve:
@@ -446,9 +455,11 @@ def main():
         return
 
     if gpg_key:
-        release_path = repo_path / prefix / "dists" / suite / "Release"
+        release_path = confined_path(repo_path, f"{prefix}/dists/{suite}/Release")
         gpg_sign(release_path, gpg_key, os.environ.get("GPG_PASSPHRASE"))
+        signer.verify(release_path.with_name("Release.gpg"), release_path)
         export_pubkey(gpg_key, repo_path, prefix)
+        manifest |= {f"{prefix}/dists/{suite}/Release.gpg", f"{prefix}/dists/{suite}/InRelease", f"{prefix}/pubkey.gpg"}
     else:
         print("Note: GPG_KEY_ID not set, skipping signing.", file=sys.stderr)
 
@@ -457,7 +468,7 @@ def main():
         print(f"Repository at: {repo}")
     else:
         print("Uploading to R2 ...")
-        upload_tree(repo_path, order=apt_upload_order, extra_args=apt_upload_headers)
+        upload_tree(repo_path, order=apt_upload_order, extra_args=apt_upload_headers, allowed_keys=manifest)
         stale_package_keys = sorted(
             set(existing_package_keys) - current_package_keys
         )
